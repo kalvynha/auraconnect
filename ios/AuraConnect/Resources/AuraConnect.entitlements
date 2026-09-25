@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- APNs. Change to "production" for TestFlight / App Store builds
+	     (Xcode does this automatically when archiving with automatic signing). -->
+	<key>aps-environment</key>
+	<string>development</string>
+
+	<!-- Encrypt every file the app writes (including the Firestore offline cache,
+	     downloaded attachments and scanned referrals) with the device passcode.
+	     Files are unreadable while the device is locked. -->
+	<key>com.apple.developer.default-data-protection</key>
+	<string>NSFileProtectionComplete</string>
+
+	<!-- Critical Alerts (bypass Do Not Disturb / mute for "critical" priority).
+	     Requires an approved request to Apple:
+	     https://developer.apple.com/contact/request/notifications-critical-alerts-entitlement/
+	     Adding the key without approval breaks code signing, so it is disabled.
+	     After approval: uncomment below, regenerate the provisioning profile,
+	     and set AppConfig.criticalAlertsEnabled = true.
+
+	<key>com.apple.developer.usernotifications.critical-alerts</key>
+	<true/>
+	-->
+</dict>
+</plist>
