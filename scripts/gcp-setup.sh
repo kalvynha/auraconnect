@@ -160,6 +160,30 @@ for ROLE in roles/aiplatform.user roles/cloudtasks.enqueuer roles/iam.serviceAcc
     --member="serviceAccount:$RUNTIME_SA" --role="$ROLE" --condition=None --quiet >/dev/null
   ok "$ROLE → $RUNTIME_SA"
 done
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:$RUNTIME_SA" --role=roles/run.invoker --condition=None --quiet >/dev/null
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:$RUNTIME_SA" --role=roles/eventarc.eventReceiver --condition=None --quiet >/dev/null
+ok "roles/run.invoker, roles/eventarc.eventReceiver → $RUNTIME_SA"
+
+# Google-managed service agents used by Storage and Firestore event triggers.
+# They are created on first use, so make sure they exist before binding.
+gcloud beta services identity create --service=pubsub.googleapis.com --project "$PROJECT_ID" >/dev/null 2>&1 || true
+gcloud beta services identity create --service=eventarc.googleapis.com --project "$PROJECT_ID" >/dev/null 2>&1 || true
+gcloud storage service-agent --project "$PROJECT_ID" >/dev/null 2>&1 || true
+bind_agent() {
+  local member="$1" role="$2" i
+  for i in 1 2 3 4 5; do
+    if gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:$member" \
+         --role="$role" --condition=None --quiet >/dev/null 2>&1; then
+      ok "$role → $member"; return 0
+    fi
+    sleep 20   # new service agents can take a minute to appear
+  done
+  warn "could not grant $role to $member — re-run this script in a few minutes"
+}
+bind_agent "service-$PROJECT_NUMBER@gs-project-accounts.iam.gserviceaccount.com" roles/pubsub.publisher
+bind_agent "service-$PROJECT_NUMBER@gcp-sa-pubsub.iam.gserviceaccount.com" roles/iam.serviceAccountTokenCreator
 
 # ---------------------------------------------------------------------------
 step "Registering apps"
