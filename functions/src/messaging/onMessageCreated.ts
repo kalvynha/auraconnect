@@ -5,6 +5,7 @@ import { db, docRef, getDocData, paths } from '../lib/db';
 import { messagePushTitle, pushToMembers } from '../lib/notify';
 import { raiseAlert } from '../alerts/raiseAlert';
 import type { Channel, Member, Message, TimestampLike } from '../shared/types';
+import { FIRESTORE_TRIGGER_REGION } from '../lib/regions';
 
 function toMillis(t: TimestampLike | null | undefined): number {
   if (!t) return 0;
@@ -73,7 +74,9 @@ export async function handleMessageCreated(orgId: string, channelId: string, mes
   });
 }
 
-export const onMessageCreated = onDocumentCreated('orgs/{orgId}/channels/{channelId}/messages/{messageId}', async (event) => {
+export const onMessageCreated = onDocumentCreated(
+  { document: 'orgs/{orgId}/channels/{channelId}/messages/{messageId}', region: FIRESTORE_TRIGGER_REGION },
+  async (event) => {
   if (!event.data) return;
   const { orgId, channelId, messageId } = event.params;
   await handleMessageCreated(orgId, channelId, messageId, event.data.data() as Message);

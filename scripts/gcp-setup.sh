@@ -222,16 +222,46 @@ cat >"$REPO_ROOT/.firebaserc" <<EOF
 EOF
 ok ".firebaserc → $PROJECT_ID"
 FN_ENV="$REPO_ROOT/functions/.env.$PROJECT_ID"
-if [[ ! -f "$FN_ENV" ]]; then
-  cat >"$FN_ENV" <<'EOF'
-GEMINI_MODEL=gemini-2.5-flash
-VERTEX_LOCATION=us-central1
-INVITE_REQUIRE_VERIFIED_EMAIL=true
-EOF
-  ok "wrote functions/.env.$PROJECT_ID (function params)"
+touch "$FN_ENV"
+# Sets KEY=VALUE in the functions env file, replacing any existing line for KEY.
+set_param() {
+  local key="$1" value="$2" tmp
+  tmp="$(mktemp)"
+  grep -v "^$key=" "$FN_ENV" >"$tmp" || true
+  echo "$key=$value" >>"$tmp"
+  mv "$tmp" "$FN_ENV"
+}
+has_param() { grep -q "^$1=" "$FN_ENV"; }
+
+has_param GEMINI_MODEL || set_param GEMINI_MODEL gemini-2.5-flash
+has_param VERTEX_LOCATION || set_param VERTEX_LOCATION us-central1
+has_param INVITE_REQUIRE_VERIFIED_EMAIL || set_param INVITE_REQUIRE_VERIFIED_EMAIL true
+
+# Event triggers must run in the same region as the Firestore database / Storage bucket.
+FS_LOC="$(gcloud firestore databases describe --database='(default)' --project "$PROJECT_ID" --format='value(locationId)' 2>/dev/null || echo "")"
+case "$FS_LOC" in
+  nam5|"") FS_REGION="us-central1" ;;
+  eur3)    FS_REGION="europe-west1" ;;
+  *)       FS_REGION="$FS_LOC" ;;
+esac
+set_param FIRESTORE_TRIGGER_REGION "$FS_REGION"
+ok "Firestore is in ${FS_LOC:-unknown} → triggers in $FS_REGION"
+
+BUCKET="$(http_body "$(gapi GET "https://firebasestorage.googleapis.com/v1alpha/projects/$PROJECT_ID/defaultBucket")" \
+  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).bucket.name.split("/").pop())}catch{}})')"
+if [[ -n "$BUCKET" ]]; then
+  BUCKET_LOC="$(gcloud storage buckets describe "gs://$BUCKET" --format='value(location)' 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+  case "$BUCKET_LOC" in
+    us|"") ST_REGION="us-central1" ;;   # US multi-region buckets accept us-central1 triggers
+    eu)    ST_REGION="europe-west1" ;;
+    *)     ST_REGION="$BUCKET_LOC" ;;
+  esac
+  set_param STORAGE_TRIGGER_REGION "$ST_REGION"
+  ok "bucket $BUCKET is in ${BUCKET_LOC:-unknown} → trigger in $ST_REGION"
 else
-  ok "functions/.env.$PROJECT_ID already exists"
+  warn "default bucket not found; STORAGE_TRIGGER_REGION left unchanged"
 fi
+ok "wrote functions/.env.$PROJECT_ID"
 
 # ---------------------------------------------------------------------------
 if [[ "$DEPLOY" == "true" ]]; then

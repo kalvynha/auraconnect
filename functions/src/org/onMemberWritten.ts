@@ -3,6 +3,7 @@ import { logger } from 'firebase-functions/v2';
 import { revokeOrgClaims, setOrgClaims } from '../lib/claims';
 import { db, docRef, paths } from '../lib/db';
 import type { Member, UserOrg } from '../shared/types';
+import { FIRESTORE_TRIGGER_REGION } from '../lib/regions';
 
 /**
  * Keeps custom claims `{ orgId, role }` and `userOrgs/{uid}` in sync with the
@@ -45,7 +46,7 @@ export async function handleMemberWritten(
   return 'synced';
 }
 
-export const onMemberWritten = onDocumentWritten('orgs/{orgId}/members/{uid}', async (event) => {
+export const onMemberWritten = onDocumentWritten({ document: 'orgs/{orgId}/members/{uid}', region: FIRESTORE_TRIGGER_REGION }, async (event) => {
   const before = event.data?.before.exists ? (event.data.before.data() as Member) : null;
   const after = event.data?.after.exists ? (event.data.after.data() as Member) : null;
   await handleMemberWritten(event.params.orgId, event.params.uid, before, after);

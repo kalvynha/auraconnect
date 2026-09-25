@@ -49,6 +49,7 @@ It's safe to re-run. You still sign the BAA, upload the APNs key, turn on MFA an
    - `GEMINI_MODEL` (default `gemini-2.5-flash`)
    - `VERTEX_LOCATION` (default `us-central1`)
    - `INVITE_REQUIRE_VERIFIED_EMAIL` (default `true`; set it to false only for tenants that sign in with SSO only)
+   - `FIRESTORE_TRIGGER_REGION` / `STORAGE_TRIGGER_REGION` (default `us-central1`): must match the Firestore database and Storage bucket regions. A `nam5` database maps to `us-central1`. `gcp-setup.sh` detects both.
 8. **Set up push:**
    - Create an APNs Auth Key (.p8) in the Apple Developer portal.
    - Upload it in Firebase console → Project settings → Cloud Messaging.
