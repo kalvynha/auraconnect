@@ -1,0 +1,15 @@
+node_modules/
+dist/
+lib/
+coverage/
+*.log
+.env
+.env.*
+!.env.example
+.firebase/
+firebase-debug*.log
+firestore-debug.log
+ui-debug.log
+.DS_Store
+GoogleService-Info.plist
+service-account*.json
