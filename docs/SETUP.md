@@ -15,6 +15,25 @@ The iOS app talks to the emulators when launched with the environment variable `
 The emulator has no Vertex AI. Referral extraction there fails unless you run with Application Default Credentials for a real GCP project (`gcloud auth application-default login` and `GCLOUD_PROJECT`).
 
 ## 2. Production project
+
+### Fast path: automated setup
+Create the project in the Firebase console, **with Google Analytics turned off**, and upgrade it to the **Blaze** plan. Then, from the repo root on your machine:
+```bash
+gcloud auth login && firebase login
+./scripts/gcp-setup.sh YOUR_PROJECT_ID --deploy
+```
+The script does steps 3–10 below for you:
+- enables the APIs
+- sets up Identity Platform with email/password
+- creates Firestore and Storage
+- grants the IAM roles
+- registers the iOS and web apps and writes `GoogleService-Info.plist` and `web/.env.local`
+- deploys
+
+It's safe to re-run. You still sign the BAA, upload the APNs key, turn on MFA and enable audit logs yourself.
+
+### Manual steps
+
 1. **Create the project.** Make a GCP project (e.g. `auraconnect-prod`) under an organization and add Firebase to it. Update `.firebaserc`.
 2. **Sign Google Cloud's BAA** (Console → IAM & Admin → Legal/Compliance). Use only covered products for PHI.
 3. **Upgrade Firebase Auth to Identity Platform** (Firebase console → Authentication → Settings):
