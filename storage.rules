@@ -1,0 +1,79 @@
+rules_version = '2';
+
+// AuraConnect Cloud Storage security rules.
+//
+// Contract: docs/DATA_MODEL.md ("Storage" table).
+//  - Claims {orgId, role} are the primary gate. Cross-service Firestore reads
+//    additionally require an active member doc (immediate revocation) and,
+//    for attachments, membership of the channel.
+//  - Objects are write-once from clients: `create` is allowed, overwrite
+//    (`update`) and `delete` are not, so an uploaded referral or attachment
+//    cannot be swapped out after the fact. Cloud Functions (Admin SDK)
+//    bypass these rules.
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function signedIn() {
+      return request.auth != null && request.auth.uid != null;
+    }
+
+    function claimOrg(orgId) {
+      return signedIn() && request.auth.token.orgId == orgId;
+    }
+
+    function memberDoc(orgId) {
+      return firestore.get(/databases/(default)/documents/orgs/$(orgId)/members/$(request.auth.uid));
+    }
+
+    function isActiveMember(orgId) {
+      return claimOrg(orgId) && memberDoc(orgId).data.active == true;
+    }
+
+    function hasRole(orgId, roles) {
+      return isActiveMember(orgId)
+        && request.auth.token.role in roles
+        && memberDoc(orgId).data.role in roles;
+    }
+
+    // Belt and braces with `update: if false`: some emulator versions
+    // evaluate an overwrite as `create`, so also require no existing object.
+    function isNewObject() {
+      return resource == null;
+    }
+
+    function underMaxSize() {
+      return request.resource.size < 25 * 1024 * 1024;
+    }
+
+    // Referral documents (scanned/uploaded PDFs or images).
+    match /orgs/{orgId}/referrals/{referralId}/{fileName} {
+      allow read: if hasRole(orgId, ['admin', 'clinician', 'intake']);
+      allow create: if isNewObject()
+        && hasRole(orgId, ['admin', 'clinician', 'intake'])
+        && underMaxSize()
+        && request.resource.contentType != null
+        && (request.resource.contentType == 'application/pdf'
+            || request.resource.contentType.matches('image/.*'));
+      allow update, delete: if false;
+    }
+
+    // Message attachments, visible to channel members only.
+    match /orgs/{orgId}/channels/{channelId}/attachments/{fileName} {
+      function isChannelMember() {
+        return isActiveMember(orgId)
+          && request.auth.uid in firestore.get(/databases/(default)/documents/orgs/$(orgId)/channels/$(channelId)).data.memberUids;
+      }
+
+      allow read: if isChannelMember();
+      // Viewers cannot post messages, so they cannot upload attachments either.
+      allow create: if isNewObject()
+        && isChannelMember()
+        && hasRole(orgId, ['admin', 'clinician', 'intake'])
+        && underMaxSize();
+      allow update, delete: if false;
+    }
+
+    // Default deny: no other paths match.
+  }
+}

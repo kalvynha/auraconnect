@@ -1,0 +1,331 @@
+rules_version = '2';
+
+// AuraConnect Firestore security rules.
+//
+// Contract: docs/DATA_MODEL.md ("Collections" table) and
+// functions/src/shared/types.ts (document shapes).
+//
+// Access model:
+//  - Custom claims {orgId, role} (set only by Cloud Functions) are the primary
+//    gate. In addition, every org-scoped check reads the caller's
+//    orgs/{orgId}/members/{uid} doc and requires `active == true` and a
+//    matching role, so deactivation/demotion takes effect immediately instead
+//    of waiting up to an hour for the ID token to refresh.
+//  - Cloud Functions use the Admin SDK and bypass these rules; everything that
+//    is "server only" in the contract is simply `allow write: if false`.
+//  - get() budget: at most 2 distinct documents are read per request
+//    (the caller's member doc and, for channel subcollections, the channel).
+//    Repeated get() of the same path is cached and billed once.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------------------------------------------------------------------
+    // Generic helpers
+    // ---------------------------------------------------------------------
+
+    function signedIn() {
+      return request.auth != null && request.auth.uid != null;
+    }
+
+    function claimOrg(orgId) {
+      return signedIn() && request.auth.token.orgId == orgId;
+    }
+
+    function role() {
+      return request.auth.token.role;
+    }
+
+    function memberDoc(orgId) {
+      return get(/databases/$(database)/documents/orgs/$(orgId)/members/$(request.auth.uid));
+    }
+
+    // Claims say the caller belongs to the org AND their member doc is active.
+    function isActiveMember(orgId) {
+      return claimOrg(orgId) && memberDoc(orgId).data.active == true;
+    }
+
+    // Claims role and the (authoritative, immediately-revocable) member doc
+    // role must both be in `roles`.
+    function hasRole(orgId, roles) {
+      return isActiveMember(orgId)
+        && role() in roles
+        && memberDoc(orgId).data.role in roles;
+    }
+
+    function isAdmin(orgId) {
+      return hasRole(orgId, ['admin']);
+    }
+
+    function canPost(orgId) {
+      return hasRole(orgId, ['admin', 'clinician', 'intake']);
+    }
+
+    // --- Shape helpers ----------------------------------------------------
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function exactKeys(keys) {
+      return incoming().keys().hasAll(keys) && incoming().keys().hasOnly(keys);
+    }
+
+    function onlyChanged(keys) {
+      return incoming().diff(resource.data).affectedKeys().hasOnly(keys);
+    }
+
+    function isNonEmptyString(v, maxLen) {
+      return v is string && v.size() > 0 && v.size() <= maxLen;
+    }
+
+    function isStringOrNull(v, maxLen) {
+      return v == null || (v is string && v.size() <= maxLen);
+    }
+
+    function isRole(v) {
+      return v in ['admin', 'clinician', 'intake', 'viewer'];
+    }
+
+    function isDiscipline(v) {
+      return v in ['RN', 'LPN', 'MD', 'NP', 'SW', 'Chaplain', 'Aide', 'Volunteer', 'Admin', 'Other'];
+    }
+
+    function isPriority(v) {
+      return v in ['normal', 'urgent', 'critical'];
+    }
+
+    // ---------------------------------------------------------------------
+    // userOrgs/{uid} — org lookup before claims refresh. Server-written.
+    // ---------------------------------------------------------------------
+    match /userOrgs/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow write: if false;
+    }
+
+    // ---------------------------------------------------------------------
+    // orgs/{orgId}
+    // ---------------------------------------------------------------------
+    match /orgs/{orgId} {
+      allow read: if isActiveMember(orgId);
+
+      // Created by `createOrg`; admins may only edit settings.
+      allow create, delete: if false;
+      allow update: if isAdmin(orgId)
+        && onlyChanged(['name', 'timezone', 'deadlineLeadDays', 'defaultEscalationPolicyId'])
+        && isNonEmptyString(incoming().name, 200)
+        && isNonEmptyString(incoming().timezone, 64)
+        && incoming().deadlineLeadDays is int
+        && incoming().deadlineLeadDays >= 0
+        && incoming().deadlineLeadDays <= 90
+        && (incoming().defaultEscalationPolicyId == null
+            || (incoming().defaultEscalationPolicyId is string
+                && exists(/databases/$(database)/documents/orgs/$(orgId)/escalationPolicies/$(incoming().defaultEscalationPolicyId))));
+
+      // -------------------------------------------------------------------
+      // members/{uid} — created by `createOrg` / `acceptInvite`.
+      // -------------------------------------------------------------------
+      match /members/{uid} {
+        allow read: if isActiveMember(orgId);
+        allow create, delete: if false;
+
+        allow update: if
+          // Admin: any field, but keep the doc well-formed.
+          (isAdmin(orgId)
+            && incoming().uid == resource.data.uid
+            && isRole(incoming().role)
+            && isDiscipline(incoming().discipline)
+            && incoming().active is bool
+            && isNonEmptyString(incoming().displayName, 200)
+            && isStringOrNull(incoming().title, 200)
+            && isStringOrNull(incoming().phone, 50)
+            && incoming().teamIds is list
+            && incoming().fcmTokens is list
+            && incoming().fcmTokens.size() <= 20)
+          ||
+          // Self: profile + device tokens only (never role/active/teamIds).
+          (request.auth.uid == uid
+            && isActiveMember(orgId)
+            && onlyChanged(['fcmTokens', 'displayName', 'phone', 'title'])
+            && incoming().fcmTokens is list
+            && incoming().fcmTokens.size() <= 20
+            && isNonEmptyString(incoming().displayName, 200)
+            && isStringOrNull(incoming().phone, 50)
+            && isStringOrNull(incoming().title, 200));
+      }
+
+      // -------------------------------------------------------------------
+      // invites/{id} — `inviteMember` / `acceptInvite` only.
+      // -------------------------------------------------------------------
+      match /invites/{inviteId} {
+        allow read: if isAdmin(orgId);
+        allow write: if false;
+      }
+
+      // -------------------------------------------------------------------
+      // Admin-managed configuration
+      // -------------------------------------------------------------------
+      match /teams/{teamId} {
+        allow read: if isActiveMember(orgId);
+        allow delete: if isAdmin(orgId);
+        allow create, update: if isAdmin(orgId)
+          && exactKeys(['name', 'description', 'memberUids', 'createdAt'])
+          && isNonEmptyString(incoming().name, 200)
+          && isStringOrNull(incoming().description, 2000)
+          && incoming().memberUids is list
+          && incoming().memberUids.size() <= 500
+          && incoming().createdAt is timestamp;
+      }
+
+      match /onCallRoles/{roleKey} {
+        allow read: if isActiveMember(orgId);
+        allow delete: if isAdmin(orgId);
+        allow create, update: if isAdmin(orgId)
+          && exactKeys(['label', 'discipline', 'teamId', 'fallbackUids'])
+          && isNonEmptyString(incoming().label, 200)
+          && (incoming().discipline == null || isDiscipline(incoming().discipline))
+          && isStringOrNull(incoming().teamId, 128)
+          && incoming().fallbackUids is list
+          && incoming().fallbackUids.size() <= 50;
+      }
+
+      match /shifts/{shiftId} {
+        allow read: if isActiveMember(orgId);
+        allow delete: if isAdmin(orgId);
+        allow create, update: if isAdmin(orgId)
+          && exactKeys(['roleKey', 'uid', 'start', 'end', 'notes'])
+          && isNonEmptyString(incoming().roleKey, 128)
+          && isNonEmptyString(incoming().uid, 128)
+          && incoming().start is timestamp
+          && incoming().end is timestamp
+          && incoming().end > incoming().start
+          && isStringOrNull(incoming().notes, 2000);
+      }
+
+      match /escalationPolicies/{policyId} {
+        allow read: if isActiveMember(orgId);
+        allow delete: if isAdmin(orgId);
+        allow create, update: if isAdmin(orgId)
+          && exactKeys(['name', 'steps'])
+          && isNonEmptyString(incoming().name, 200)
+          && incoming().steps is list
+          && incoming().steps.size() >= 1
+          && incoming().steps.size() <= 10;
+      }
+
+      // -------------------------------------------------------------------
+      // channels/{channelId} — created/updated by functions only.
+      // -------------------------------------------------------------------
+      match /channels/{channelId} {
+        allow read: if isActiveMember(orgId)
+          && request.auth.uid in resource.data.memberUids;
+        allow write: if false;
+
+        function channelDoc() {
+          return get(/databases/$(database)/documents/orgs/$(orgId)/channels/$(channelId));
+        }
+
+        function isChannelMember() {
+          return isActiveMember(orgId)
+            && request.auth.uid in channelDoc().data.memberUids;
+        }
+
+        // Clients write messages directly (offline-friendly); functions
+        // fill in alertId and the channel's lastMessage.
+        match /messages/{messageId} {
+          allow read: if isChannelMember();
+
+          allow create: if isChannelMember()
+            && canPost(orgId)
+            && channelDoc().data.archived != true
+            && exactKeys(['senderUid', 'senderName', 'body', 'priority',
+                          'attachments', 'roleTarget', 'createdAt', 'alertId'])
+            && incoming().senderUid == request.auth.uid
+            && isNonEmptyString(incoming().senderName, 200)
+            && incoming().body is string
+            && incoming().body.size() <= 8000
+            && isPriority(incoming().priority)
+            && incoming().attachments is list
+            && incoming().attachments.size() <= 10
+            && (incoming().body.size() > 0 || incoming().attachments.size() > 0)
+            && incoming().roleTarget == null
+            && incoming().createdAt == request.time
+            && incoming().alertId == null;
+
+          allow update, delete: if false;
+        }
+
+        // Read receipts: each member maintains only their own.
+        match /reads/{uid} {
+          allow read: if isChannelMember();
+          allow create, update: if request.auth.uid == uid
+            && isChannelMember()
+            && exactKeys(['lastReadAt'])
+            && incoming().lastReadAt == request.time;
+          allow delete: if false;
+        }
+      }
+
+      // -------------------------------------------------------------------
+      // alerts/{alertId} — created/acked/escalated by functions only.
+      // -------------------------------------------------------------------
+      match /alerts/{alertId} {
+        allow read: if isActiveMember(orgId)
+          && (request.auth.uid in resource.data.targetUids || isAdmin(orgId));
+        allow write: if false;
+      }
+
+      // -------------------------------------------------------------------
+      // patients/{patientId} — `admitPatient` / `acceptReferral` only.
+      // -------------------------------------------------------------------
+      match /patients/{patientId} {
+        allow read: if isActiveMember(orgId);
+        allow write: if false;
+      }
+
+      // -------------------------------------------------------------------
+      // referrals/{referralId} — client creates the record, then uploads
+      // the file; everything after that is server-side.
+      // -------------------------------------------------------------------
+      match /referrals/{referralId} {
+        allow read: if hasRole(orgId, ['admin', 'clinician', 'intake']);
+
+        allow create: if hasRole(orgId, ['admin', 'clinician', 'intake'])
+          && exactKeys(['fileName', 'contentType', 'storagePath', 'source', 'status',
+                        'extracted', 'error', 'model', 'patientId', 'uploadedBy',
+                        'reviewedBy', 'rejectionReason', 'createdAt', 'updatedAt'])
+          && incoming().status == 'uploaded'
+          && incoming().uploadedBy == request.auth.uid
+          && incoming().source in ['scan', 'upload', 'fax']
+          && isNonEmptyString(incoming().fileName, 255)
+          && incoming().fileName.matches('[^/]+')
+          && incoming().fileName != '.'
+          && incoming().fileName != '..'
+          && incoming().contentType is string
+          && (incoming().contentType == 'application/pdf'
+              || incoming().contentType.matches('image/.*'))
+          && incoming().storagePath == 'orgs/' + orgId + '/referrals/' + referralId + '/' + incoming().fileName
+          && incoming().extracted == null
+          && incoming().error == null
+          && incoming().model == null
+          && incoming().patientId == null
+          && incoming().reviewedBy == null
+          && incoming().rejectionReason == null
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+
+        allow update, delete: if false;
+      }
+
+      // -------------------------------------------------------------------
+      // auditLogs/{id} — written only by Cloud Functions.
+      // -------------------------------------------------------------------
+      match /auditLogs/{logId} {
+        allow read: if isAdmin(orgId);
+        allow write: if false;
+      }
+    }
+
+    // Everything else is denied by default (no catch-all match).
+  }
+}

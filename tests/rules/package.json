@@ -1,0 +1,21 @@
+{
+  "name": "auraconnect-rules-tests",
+  "private": true,
+  "type": "module",
+  "description": "Firestore and Storage security rules tests (run against the Firebase emulators).",
+  "scripts": {
+    "test": "firebase emulators:exec --config ../../firebase.json --only firestore,storage --project demo-auraconnect \"vitest run\"",
+    "test:ci": "firebase emulators:exec --config ../../firebase.json --only firestore,storage --project demo-auraconnect \"vitest run --reporter=verbose\"",
+    "test:watch": "vitest",
+    "test:no-proxy": "env -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy npm test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^5.0.2",
+    "firebase": "^12.19.0",
+    "firebase-tools": "^15.31.0",
+    "vitest": "^5.0.1"
+  }
+}
