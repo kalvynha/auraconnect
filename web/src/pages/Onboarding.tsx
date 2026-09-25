@@ -1,17 +1,19 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import type { AcceptInviteRequest, AcceptInviteResponse, CreateOrgRequest, CreateOrgResponse, Discipline, Role } from '@shared/types';
+import { reload, sendEmailVerification } from 'firebase/auth';
+import type {
+  AcceptInviteRequest,
+  AcceptInviteResponse,
+  CreateOrgRequest,
+  CreateOrgResponse,
+  Discipline,
+  ListMyInvitesResponse,
+  MyInvite,
+} from '@shared/types';
 import { call } from '../lib/firebase';
 import { DISCIPLINES, TIMEZONES } from '../lib/constants';
 import { errorMessage } from '../lib/format';
 import { useSession } from '../lib/session';
 import { Badge, Button, Card, ErrorBanner, Field, Loading } from '../components/ui';
-
-interface MyInvite {
-  orgId: string;
-  inviteId: string;
-  orgName: string;
-  role: Role;
-}
 
 export default function OnboardingPage() {
   const s = useSession();
@@ -25,9 +27,30 @@ export default function OnboardingPage() {
   const [displayName, setDisplayName] = useState(s.user?.displayName ?? '');
   const [discipline, setDiscipline] = useState<Discipline>('Admin');
   const [creating, setCreating] = useState(false);
+  const [verified, setVerified] = useState(s.user?.emailVerified ?? false);
+  const [verifyNote, setVerifyNote] = useState<string | null>(null);
+
+  async function sendVerification() {
+    if (!s.user) return;
+    setError(null);
+    try {
+      await sendEmailVerification(s.user);
+      setVerifyNote(`Verification email sent to ${s.user.email}.`);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }
+
+  async function checkVerified() {
+    if (!s.user) return;
+    await reload(s.user);
+    await s.user.getIdToken(true);
+    setVerified(s.user.emailVerified);
+    if (!s.user.emailVerified) setVerifyNote('Not verified yet — open the link in the email, then try again.');
+  }
 
   useEffect(() => {
-    call<Record<string, never>, { invites: MyInvite[] }>('listMyInvites', {})
+    call<Record<string, never>, ListMyInvitesResponse>('listMyInvites', {})
       .then((r) => setInvites(r.invites))
       .catch((err) => {
         setInvites([]);
@@ -89,18 +112,36 @@ export default function OnboardingPage() {
           ) : invites.length === 0 ? (
             <p className="muted">No pending invitations for {s.user?.email}.</p>
           ) : (
+            <>
+            {!verified && (
+              <div className="form">
+                <p className="muted">Verify your email address before accepting an invitation.</p>
+                {verifyNote && <p className="muted">{verifyNote}</p>}
+                <div className="row">
+                  <Button small onClick={() => void sendVerification()}>Send verification email</Button>
+                  <Button small variant="ghost" onClick={() => void checkVerified()}>I've verified</Button>
+                </div>
+              </div>
+            )}
             <ul className="list">
               {invites.map((inv) => (
                 <li key={inv.inviteId} className="list-row">
                   <div>
                     <strong>{inv.orgName}</strong> <Badge value={inv.role} />
                   </div>
-                  <Button variant="primary" small busy={busyId === inv.inviteId} onClick={() => void accept(inv)}>
+                  <Button
+                    variant="primary"
+                    small
+                    disabled={!verified}
+                    busy={busyId === inv.inviteId}
+                    onClick={() => void accept(inv)}
+                  >
                     Accept
                   </Button>
                 </li>
               ))}
             </ul>
+            </>
           )}
         </Card>
         <Card title="Create a new organization">

@@ -471,6 +471,9 @@ export interface InviteMemberResponse { inviteId: string }
 export interface AcceptInviteRequest { orgId: string; inviteId: string }
 export interface AcceptInviteResponse { orgId: string; role: Role }
 
+/** `listMyInvites` — pending invites addressed to the caller's (verified) email. */
+export interface MyInvite { orgId: string; inviteId: string; orgName: string; role: Role }
+export interface ListMyInvitesResponse { invites: MyInvite[] }
 export interface CreateChannelRequest {
   orgId: string;
   type: 'direct' | 'group' | 'team';

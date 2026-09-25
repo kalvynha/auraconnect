@@ -26,7 +26,10 @@ The emulator has no Vertex AI. Referral extraction there fails unless you run wi
 6. **Grant IAM:**
    - The Functions runtime service account needs `roles/aiplatform.user`, `roles/cloudtasks.enqueuer` and `roles/iam.serviceAccountTokenCreator`, plus `roles/firebaseauth.admin` (usually granted already).
    - Before enabling Vertex AI calls, confirm the Gemini model you picked is available in `VERTEX_LOCATION`.
-7. **Set function params.** When you deploy, answer the prompts for `GEMINI_MODEL` (default `gemini-2.5-flash`) and `VERTEX_LOCATION` (default `us-central1`), or set them in `functions/.env.<projectId>`.
+7. **Set function params.** When you deploy, answer the prompts, or set them in `functions/.env.<projectId>`:
+   - `GEMINI_MODEL` (default `gemini-2.5-flash`)
+   - `VERTEX_LOCATION` (default `us-central1`)
+   - `INVITE_REQUIRE_VERIFIED_EMAIL` (default `true`; set it to false only for tenants that sign in with SSO only)
 8. **Set up push:**
    - Create an APNs Auth Key (.p8) in the Apple Developer portal.
    - Upload it in Firebase console → Project settings → Cloud Messaging.

@@ -58,18 +58,23 @@ All client apps (iOS, web) must follow these rules.
    - it writes the message with `roleTarget` set
 
 ## Alerts and escalation
-- An alert starts at `level 0`, notifying `currentTargetUids`.
-- If a policy applies, a Cloud Task is enqueued for `steps[level].waitMinutes`.
-- When the task fires and the alert is still `open`, it advances to `level + 1`:
-  - resolves that step's target (`role` means the on-call person now, `uid` a specific person, `original` the first recipients)
-  - adds them to `targetUids`, pushes to them, appends to `history`, and enqueues the next wait
-- Once the last step has been notified, the alert is marked `exhausted: true`.
-- `ackAlert` sets `status: 'acked'`, which stops escalation. Only someone in `targetUids`, or an admin, can acknowledge.
-- `resolveAlert` sets `status: 'resolved'`.
-- Push priorities:
-  - `critical` uses the APNs `critical` interruption level with critical sound (this needs Apple's Critical Alerts entitlement; without it iOS treats the alert as time-sensitive)
-  - `urgent` uses `time-sensitive`
-  - `normal` uses `active`
+- **Levels map to policy steps.** Level `i` means `steps[i]`: step `i`'s target is notified, the alert then waits `steps[i].waitMinutes`, and moves to level `i + 1`.
+  - At creation, level 0 notifies the explicit targets plus `steps[0].target`.
+  - Step targets: `role` is whoever is on call right now, `uid` is a specific person, `original` is the first recipients.
+- **Each level schedules one Cloud Task.**
+  - When it fires, the payload's `{orgId, alertId, expectedLevel}` is checked. It does nothing if the alert isn't `open` or the level has already moved on.
+  - Task ids are fixed per level, so enqueuing the same task twice is ignored.
+  - Newly notified people are added to `targetUids` and the step is appended to `history`.
+- **When the last step's wait runs out** with no ack, the alert is marked `exhausted: true`.
+- **Acknowledge and resolve:**
+  - `ackAlert` sets `status: 'acked'`, which stops escalation. Only someone in `targetUids`, or an admin, can acknowledge. Acking twice does nothing.
+  - `resolveAlert` sets `status: 'resolved'` (and sets `ackedBy` if nobody had acknowledged yet).
+- **Urgent and critical messages send a single alert push.** The data is `{type:'alert', orgId, alertId, channelId, priority}`, and clients open the channel when `channelId` is present. This push replaces the normal message push. The alert id is `msg_{channelId}_{messageId}`, so a retried trigger can't create a second alert.
+- **Actions with no human actor** (escalation, deadlines, extraction) record `'system'` as `createdBy` / `actorUid`.
+- **Push levels:**
+  - `critical` uses the APNs `critical` interruption level with critical sound. This needs Apple's Critical Alerts entitlement; without it, iOS treats the alert as time-sensitive.
+  - `urgent` uses `time-sensitive`.
+  - `normal` uses `active`.
 
 ## Patient onboarding and milestones
 - **`admitPatient`:**
@@ -83,9 +88,11 @@ All client apps (iOS, web) must follow these rules.
   - **F2F** is required for period ≥ 3. The window is the 30 days before the period starts; due by the day before the period starts.
   - **HOPE:** the admission assessment is due by day 5. HUV1 falls on days 6–15 and HUV2 on days 16–30.
   - These rules follow CMS hospice regulations as understood at build time. **Compliance staff must check them.**
-- **`checkDeadlines`** runs daily at 07:00 in the org's timezone:
+- **`checkDeadlines`** runs hourly and only handles orgs whose local hour is 07, so each org is checked once a day at 07:00 its own time:
   - For each admitted patient, it raises a `deadline` alert to the care team for any NOE, recert (period end), F2F or HOPE milestone due within `deadlineLeadDays` or overdue.
   - It skips keys already in `remindedMilestones`.
+  - Overdue milestones raise `urgent` alerts, upcoming ones `normal`. The patient's name appears only in the alert body in Firestore, never in a push.
+  - If the patient has no active care team, the alert goes to the org's admins.
 
 ## Referral scan and AI extraction
 1. **Create the record.** The client creates `referrals/{id}` with `status: 'uploaded'`, `storagePath: orgs/{orgId}/referrals/{id}/{fileName}` and the remaining fields set to null. It then uploads the file.
@@ -96,7 +103,7 @@ All client apps (iOS, web) must follow these rules.
    3. normalizes the result, sets `extracted`, `model`, `status: 'needs_review'`
    - On error it sets `status: 'failed'` and `error`.
 3. **Review.** A person reviews and edits the fields in the app. Fields with `fieldConfidence < 0.7` must be highlighted.
-4. **Accept.** `acceptReferral({ patient })` creates a `referral`-status patient and links `patientId`. The onboarding wizard then calls `admitPatient({ patientId, … })`.
+4. **Accept.** `acceptReferral({ patient })` (allowed from `needs_review` or `failed`; calling it again returns the same patient) creates a `referral`-status patient and links `patientId`. The onboarding wizard then calls `admitPatient({ patientId, … })`.
 5. **Reject or retry.** `rejectReferral` and `retryReferralExtraction` are also available.
 
 ## Callable functions
@@ -106,8 +113,8 @@ All are HTTPS callables in `us-central1`. Each takes `orgId` and checks it again
 |---|---|---|
 | `createOrg` | any signed-in user without an org | `CreateOrgRequest → CreateOrgResponse` |
 | `inviteMember` | admin | `InviteMemberRequest → InviteMemberResponse` |
-| `acceptInvite` | invitee (email must match) | `AcceptInviteRequest → AcceptInviteResponse` |
-| `listMyInvites` | signed-in user | `{} → { invites: {orgId, inviteId, orgName, role}[] }` |
+| `acceptInvite` | invitee (email must match and be **verified**; `INVITE_REQUIRE_VERIFIED_EMAIL` param, default true) | `AcceptInviteRequest → AcceptInviteResponse` |
+| `listMyInvites` | signed-in user | `{} → ListMyInvitesResponse` |
 | `createChannel` | member (not viewer) | `CreateChannelRequest → CreateChannelResponse` |
 | `updateChannelMembers` | channel member (not viewer) | `UpdateChannelMembersRequest → {}` |
 | `sendRoleMessage` | member (not viewer) | `SendRoleMessageRequest → SendRoleMessageResponse` |
