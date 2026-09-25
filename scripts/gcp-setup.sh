@@ -168,9 +168,9 @@ ok "roles/run.invoker, roles/eventarc.eventReceiver → $RUNTIME_SA"
 
 # Google-managed service agents used by Storage and Firestore event triggers.
 # They are created on first use, so make sure they exist before binding.
-gcloud beta services identity create --service=pubsub.googleapis.com --project "$PROJECT_ID" >/dev/null 2>&1 || true
-gcloud beta services identity create --service=eventarc.googleapis.com --project "$PROJECT_ID" >/dev/null 2>&1 || true
-gcloud storage service-agent --project "$PROJECT_ID" >/dev/null 2>&1 || true
+gcloud beta services identity create --service=pubsub.googleapis.com --project "$PROJECT_ID" --quiet >/dev/null 2>&1 </dev/null || true
+gcloud beta services identity create --service=eventarc.googleapis.com --project "$PROJECT_ID" --quiet >/dev/null 2>&1 </dev/null || true
+gcloud storage service-agent --project "$PROJECT_ID" --quiet >/dev/null 2>&1 </dev/null || true
 bind_agent() {
   local member="$1" role="$2" i
   for i in 1 2 3 4 5; do
