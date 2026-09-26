@@ -26,6 +26,14 @@ struct MoreView: View {
                 }
             }
 
+            if org.role == .admin {
+                Section("Organization") {
+                    NavigationLink(value: Route.members) {
+                        Label("Members", systemImage: "person.2")
+                    }
+                }
+            }
+
             Section {
                 NavigationLink(value: Route.settings) {
                     Label("Settings", systemImage: "gearshape")

@@ -121,7 +121,7 @@ AuraConnect/
     Util/         ISODate, MilestoneLogic, ChannelLogic, Binding helpers
     UI/           Shared components (badges, pills, form fields)
   Features/       Auth, Onboarding, Inbox, Chat, NewMessage, Patients, PatientOnboarding,
-                  Alerts, Schedule, ReferralScan, Settings
+                  Alerts, Schedule, ReferralScan, Members, Settings
   Resources/      Assets.xcassets, AuraConnect.entitlements
 AuraConnectTests/ Unit tests for the pure logic (dates, milestones, unread, push parsing, models)
 ```
@@ -147,6 +147,8 @@ These are defined in the repo's `firestore.indexes.json`:
 
 - `channels`: `memberUids` array-contains, then `lastMessageAt` descending
 - `alerts`: `targetUids` array-contains, then `createdAt` descending
+
+The admin Members screen also lists pending invites with `status == "pending"` ordered by `createdAt` descending. That query needs a composite index on `invites` (collection scope): `status` ascending, then `createdAt` descending. Add it to `firestore.indexes.json` if it isn't there yet, otherwise the pending invites section shows an index error.
 
 The remaining queries use single-field indexes:
 

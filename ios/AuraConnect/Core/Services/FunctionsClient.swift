@@ -44,6 +44,26 @@ struct FunctionsClient {
         return try string("orgId", in: response, from: "createOrg")
     }
 
+    /// Admin only. Returns the new invite id.
+    func inviteMember(
+        orgId: String,
+        email: String,
+        displayName: String,
+        role: Role,
+        discipline: Discipline,
+        teamIds: [String]
+    ) async throws -> String {
+        let response = try await call("inviteMember", [
+            "orgId": orgId,
+            "email": email,
+            "displayName": displayName,
+            "role": role.rawValue,
+            "discipline": discipline.rawValue,
+            "teamIds": teamIds,
+        ])
+        return try string("inviteId", in: response, from: "inviteMember")
+    }
+
     func listMyInvites() async throws -> [InviteSummary] {
         let response = try await call("listMyInvites", [:])
         let raw = response["invites"] as? [[String: Any]] ?? []

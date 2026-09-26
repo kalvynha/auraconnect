@@ -12,6 +12,7 @@ enum Route: Hashable {
     case alert(String)
     case referral(String)
     case referrals
+    case members
     case settings
 }
 

@@ -96,6 +96,8 @@ struct RouteDestinationView: View {
             ReferralDetailView(referralId: id)
         case .referrals:
             ReferralsListView()
+        case .members:
+            MembersView()
         case .settings:
             SettingsView()
         }

@@ -65,3 +65,37 @@ struct InviteSummary: Identifiable, Hashable {
 
     var id: String { "\(orgId)/\(inviteId)" }
 }
+
+/// `orgs/{orgId}/invites/{inviteId}` — written only by `inviteMember` / `acceptInvite`; readable by admins.
+struct Invite: Codable, Identifiable {
+    @DocumentID var id: String?
+    /// Lower-cased email the invite is bound to.
+    var email: String?
+    var displayName: String?
+    var role: Role?
+    var discipline: Discipline?
+    var teamIds: [String]?
+    /// `pending`, `accepted` or `revoked`.
+    var status: String?
+    var createdBy: String?
+    var createdAt: Date?
+    var acceptedBy: String?
+    var acceptedAt: Date?
+
+    static let pendingStatus = "pending"
+
+    var name: String {
+        displayName?.nilIfBlank ?? email?.nilIfBlank ?? "Invitee"
+    }
+}
+
+/// `orgs/{orgId}/teams/{teamId}`
+struct Team: Codable, Identifiable {
+    @DocumentID var id: String?
+    var name: String?
+    var description: String?
+    var memberUids: [String]?
+    var createdAt: Date?
+
+    var displayName: String { name?.nilIfBlank ?? "Unnamed team" }
+}

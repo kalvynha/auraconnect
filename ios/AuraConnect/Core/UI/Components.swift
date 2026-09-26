@@ -18,6 +18,17 @@ extension Priority {
     }
 }
 
+extension Role {
+    var color: Color {
+        switch self {
+        case .admin: return .purple
+        case .clinician: return .blue
+        case .intake: return .teal
+        case .viewer: return .secondary
+        }
+    }
+}
+
 extension MilestoneStatus {
     var color: Color {
         switch self {
