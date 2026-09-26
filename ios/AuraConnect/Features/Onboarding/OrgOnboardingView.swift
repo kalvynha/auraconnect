@@ -1,5 +1,6 @@
 import SwiftUI
 import Observation
+import FirebaseAuth
 
 @MainActor
 @Observable
@@ -32,6 +33,12 @@ final class OrgOnboardingViewModel {
         isWorking = true
         defer { isWorking = false }
         do {
+            // The ID token refreshes hourly; after verifying by email link it can still say
+            // email_verified=false, so reload the user and force a fresh token first.
+            if let user = Auth.auth().currentUser {
+                try await user.reload()
+                _ = try await user.getIDTokenResult(forcingRefresh: true)
+            }
             try await functions.acceptInvite(orgId: invite.orgId, inviteId: invite.inviteId)
             return true
         } catch {

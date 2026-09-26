@@ -67,6 +67,12 @@ export default function OnboardingPage() {
     setBusyId(inv.inviteId);
     setError(null);
     try {
+      // The ID token only refreshes hourly, so after clicking the verification link it can
+      // still say email_verified=false. Reload the user and force a fresh token first.
+      if (s.user) {
+        await reload(s.user);
+        await s.user.getIdToken(true);
+      }
       await call<AcceptInviteRequest, AcceptInviteResponse>('acceptInvite', { orgId: inv.orgId, inviteId: inv.inviteId });
       await finish();
     } catch (err) {
