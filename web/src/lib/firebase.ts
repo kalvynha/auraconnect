@@ -5,7 +5,14 @@ import { connectFunctionsEmulator, getFunctions, httpsCallable } from 'firebase/
 import { connectStorageEmulator, getStorage } from 'firebase/storage';
 
 // NOTE: Firebase Analytics is intentionally NOT used (HIPAA).
-const firebaseConfig = {
+declare global {
+  interface Window {
+    /** Set by main.tsx from Firebase Hosting's /__/firebase/init.json when the build has no valid config. */
+    __AURA_FIREBASE_CONFIG__?: Record<string, string>;
+  }
+}
+
+const envConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
   authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
   projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
@@ -13,6 +20,7 @@ const firebaseConfig = {
   messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
   appId: import.meta.env.VITE_FIREBASE_APP_ID,
 };
+const firebaseConfig = window.__AURA_FIREBASE_CONFIG__ ?? envConfig;
 
 export const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
