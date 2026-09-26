@@ -43,7 +43,12 @@ const missing: string[] = REQUIRED_ENV.filter((k) => isBlank(import.meta.env[k])
 const apiKey = String(import.meta.env.VITE_FIREBASE_API_KEY ?? '');
 // Browser API keys are always "AIza" + 35 characters; anything else is a copy/paste or config problem.
 if (!missing.includes('VITE_FIREBASE_API_KEY') && !/^AIza[0-9A-Za-z_-]{35}$/.test(apiKey)) {
-  missing.push(`VITE_FIREBASE_API_KEY (got "${apiKey.slice(0, 8)}…", ${apiKey.length} chars; expected AIza… with 39 chars)`);
+  const bad = [...apiKey].findIndex((ch, i) => (i < 4 ? ch !== 'AIza'[i] : !/[0-9A-Za-z_-]/.test(ch)));
+  const where =
+    bad >= 0
+      ? `character ${bad + 1} is "${[...apiKey][bad]}" (U+${[...apiKey][bad]!.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}), which is not a plain letter/digit — retype it`
+      : `${apiKey.length} chars; expected AIza… with 39 chars`;
+  missing.push(`VITE_FIREBASE_API_KEY (${where})`);
 }
 
 if (missing.length > 0) {
