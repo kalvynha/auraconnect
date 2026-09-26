@@ -177,6 +177,15 @@ export class Query {
   orderBy(field: string, dir: 'asc' | 'desc' = 'asc'): Query {
     return new Query(this.fs, this.collectionPath, this.groupId, this.filters, this.limitN, [...this.orders, { field, dir }]);
   }
+  /** Aggregate count, like `query.count().get()` → `snap.data().count`. */
+  count(): { get: () => Promise<{ data: () => { count: number } }> } {
+    return {
+      get: async () => {
+        const n = (await this.get()).size;
+        return { data: () => ({ count: n }) };
+      },
+    };
+  }
   private matches(data: Data): boolean {
     return this.filters.every(({ field, op, value }) => {
       const v = getField(data, field);

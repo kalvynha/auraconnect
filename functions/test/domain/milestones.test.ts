@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { computeMilestones, upcomingDeadlines } from '../../src/domain/milestones';
+import {
+  allMilestoneKeys,
+  completedOnTime,
+  computeMilestones,
+  parseMilestoneKey,
+  unhandledDeadlines,
+  upcomingDeadlines,
+} from '../../src/domain/milestones';
 
 describe('computeMilestones', () => {
   const m = computeMilestones('2026-01-01', 1, '2026-01-01');
@@ -106,5 +113,34 @@ describe('upcomingDeadlines', () => {
   it('respects lead days', () => {
     expect(upcomingDeadlines(m, '2026-03-20', 3).find((x) => x.kind === 'recert')).toBeUndefined();
     expect(upcomingDeadlines(m, '2026-03-20', 14).find((x) => x.kind === 'recert')).toBeDefined();
+  });
+});
+
+describe('milestone completions', () => {
+  const m = computeMilestones('2026-09-20', 1, '2026-09-20');
+
+  it('skips reminded and completed keys', () => {
+    const due = upcomingDeadlines(m, '2026-09-23', 3); // HOPE admission 09-24, NOE 09-25
+    expect(due.map((d) => d.key)).toEqual(['hope_admission:2026-09-24', 'noe:2026-09-25']);
+    const completions = { 'noe:2026-09-25': { completedAt: null, completedBy: 'u', note: null } };
+    expect(unhandledDeadlines(due, [], completions).map((d) => d.key)).toEqual(['hope_admission:2026-09-24']);
+    expect(unhandledDeadlines(due, ['hope_admission:2026-09-24'], completions)).toEqual([]);
+    expect(unhandledDeadlines(due, undefined, undefined)).toHaveLength(2);
+  });
+
+  it('parses keys and lists every key a patient can have', () => {
+    expect(parseMilestoneKey('f2f:2027-02-16')).toEqual({ kind: 'f2f', dueDate: '2027-02-16' });
+    expect(parseMilestoneKey('bogus:2027-02-16')).toBeNull();
+    expect(parseMilestoneKey('noe:2027-02-30')).toBeNull();
+    const keys = allMilestoneKeys(m);
+    expect(keys).toContain('noe:2026-09-25');
+    expect(keys).toContain(`recert:${m.benefitPeriods[0]!.end}`);
+    expect(keys).toContain(`f2f:${m.benefitPeriods[2]!.f2fDueBy}`);
+    expect(keys.filter((k) => k.startsWith('f2f:'))).toHaveLength(4); // periods 3–6
+  });
+
+  it('on time means completion date ≤ due date', () => {
+    expect(completedOnTime('noe:2026-09-25', '2026-09-25')).toBe(true);
+    expect(completedOnTime('noe:2026-09-25', '2026-09-26')).toBe(false);
   });
 });

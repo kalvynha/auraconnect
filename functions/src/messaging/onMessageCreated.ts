@@ -1,4 +1,4 @@
-import { Timestamp } from 'firebase-admin/firestore';
+import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 import { onDocumentCreated } from 'firebase-functions/v2/firestore';
 import { truncateText } from '../domain/channels';
 import { db, docRef, getDocData, paths } from '../lib/db';
@@ -18,23 +18,41 @@ export function messageAlertId(channelId: string, messageId: string): string {
 }
 
 /**
- * 1. Updates channel.lastMessage/lastMessageAt (only if this message is newer).
+ * 1. Top-level message: updates channel.lastMessage/lastMessageAt (only if
+ *    this message is newer).
+ *    Thread reply (`threadParentId` set): increments the parent's
+ *    `replyCount` and advances its `lastReplyAt`; the channel preview is left
+ *    unchanged, but the reply is still pushed / alerted like any message.
  * 2. normal: pushes "New message" to the other members.
  *    urgent/critical: raises a `message` alert to the other members with the
  *    org default policy and sets message.alertId. The alert's push (sent by
  *    onAlertCreated, titled "Urgent/Critical message", carrying channelId) is
  *    the only push for that message, so recipients are not notified twice.
+ * 3. Broadcast channels: only messages from the channel creator are fanned
+ *    out, and they are pushed at their priority without an escalating alert
+ *    (a broadcast is an announcement, not an ack-required page to everyone).
  */
 export async function handleMessageCreated(orgId: string, channelId: string, messageId: string, message: Message): Promise<void> {
   const channelRef = docRef(paths.channel(orgId, channelId));
   const at = message.createdAt && toMillis(message.createdAt) > 0 ? message.createdAt : Timestamp.now();
   const text = truncateText(message.body ?? '') || (message.attachments?.length ? 'Attachment' : '');
+  const parentId = typeof message.threadParentId === 'string' && message.threadParentId && message.threadParentId !== messageId ? message.threadParentId : null;
+  const parentRef = parentId ? docRef(paths.message(orgId, channelId, parentId)) : null;
 
   const channel = await db().runTransaction(async (tx) => {
     const snap = await tx.get(channelRef);
+    const parentSnap = parentRef ? await tx.get(parentRef) : null;
     if (!snap.exists) return null;
     const c = snap.data() as Channel;
-    if (!c.lastMessage || toMillis(c.lastMessageAt) <= toMillis(at)) {
+    if (parentRef) {
+      if (parentSnap?.exists) {
+        const parent = parentSnap.data() as Message;
+        tx.update(parentRef, {
+          replyCount: FieldValue.increment(1),
+          ...(toMillis(parent.lastReplyAt) <= toMillis(at) ? { lastReplyAt: at } : {}),
+        });
+      }
+    } else if (!c.lastMessage || toMillis(c.lastMessageAt) <= toMillis(at)) {
       tx.update(channelRef, {
         lastMessage: { text, senderUid: message.senderUid, senderName: message.senderName, priority: message.priority, at },
         lastMessageAt: at,
@@ -46,6 +64,12 @@ export async function handleMessageCreated(orgId: string, channelId: string, mes
 
   const recipients = channel.memberUids.filter((u) => u !== message.senderUid);
   if (recipients.length === 0) return;
+
+  if (channel.type === 'broadcast') {
+    if (message.senderUid !== channel.createdBy) return;
+    await pushToMembers(orgId, recipients, messagePushTitle(message.priority), { type: 'message', orgId, channelId, priority: message.priority });
+    return;
+  }
 
   if (message.priority === 'urgent' || message.priority === 'critical') {
     if (message.alertId) return;

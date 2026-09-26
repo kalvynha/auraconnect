@@ -2,11 +2,11 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { logger } from 'firebase-functions/v2';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
 import { localDateParts } from '../domain/dates';
-import { MILESTONE_LABELS, upcomingDeadlines } from '../domain/milestones';
+import { MILESTONE_LABELS, unhandledDeadlines, upcomingDeadlines } from '../domain/milestones';
 import { colRef, db, docRef, paths } from '../lib/db';
-import { loadActiveMembers } from '../lib/members';
+import { loadActiveMembers, orgAdminUids } from '../lib/members';
 import { raiseAlert } from '../alerts/raiseAlert';
-import type { Member, Org, Patient } from '../shared/types';
+import type { Org, Patient } from '../shared/types';
 
 /** Local hour at which reminders are raised (DATA_MODEL: 07:00 org time). */
 export const REMINDER_LOCAL_HOUR = 7;
@@ -15,14 +15,9 @@ export function deadlineAlertId(patientId: string, key: string): string {
   return `dl_${patientId}_${key}`.replace(/[^A-Za-z0-9_-]/g, '_');
 }
 
-async function orgAdmins(orgId: string): Promise<string[]> {
-  const snap = await colRef(paths.members(orgId)).where('role', '==', 'admin').where('active', '==', true).limit(20).get();
-  return snap.docs.map((d) => (d.data() as Member).uid);
-}
-
 /**
  * Raises deadline alerts for one org's admitted patients as of `today` (org-local).
- * Keys already in `remindedMilestones` are skipped; new keys are recorded.
+ * Keys already in `remindedMilestones` or `milestoneCompletions` are skipped; new keys are recorded.
  * Care team → alert targets; an empty/inactive care team falls back to org admins.
  */
 export async function checkOrgDeadlines(orgId: string, org: Org, today: string): Promise<number> {
@@ -32,12 +27,15 @@ export async function checkOrgDeadlines(orgId: string, org: Org, today: string):
   for (const doc of patients.docs) {
     const p = doc.data() as Patient;
     if (!p.milestones) continue;
-    const reminded = new Set(p.remindedMilestones ?? []);
-    const due = upcomingDeadlines(p.milestones, today, org.deadlineLeadDays ?? 3).filter((d) => !reminded.has(d.key));
+    const due = unhandledDeadlines(
+      upcomingDeadlines(p.milestones, today, org.deadlineLeadDays ?? 3),
+      p.remindedMilestones,
+      p.milestoneCompletions,
+    );
     if (due.length === 0) continue;
 
     let targets = [...(await loadActiveMembers(orgId, p.careTeamUids ?? [])).keys()];
-    if (targets.length === 0) targets = admins ??= await orgAdmins(orgId);
+    if (targets.length === 0) targets = admins ??= await orgAdminUids(orgId);
     if (targets.length === 0) {
       logger.warn('no recipients for deadline alert', { orgId, patientId: doc.id });
       continue;

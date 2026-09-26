@@ -131,3 +131,50 @@ export function upcomingDeadlines(milestones: Milestones, today: ISODate, leadDa
     }))
     .sort((a, b) => compareISO(a.dueDate, b.dueDate));
 }
+
+const MILESTONE_KINDS: readonly MilestoneKind[] = ['noe', 'recert', 'f2f', 'hope_admission', 'hope_huv1', 'hope_huv2'];
+
+/** Parses `{kind}:{dueDate}`; null when the kind or date is invalid. */
+export function parseMilestoneKey(key: string): { kind: MilestoneKind; dueDate: ISODate } | null {
+  const idx = key.indexOf(':');
+  if (idx < 0) return null;
+  const kind = key.slice(0, idx) as MilestoneKind;
+  const dueDate = key.slice(idx + 1);
+  if (!MILESTONE_KINDS.includes(kind) || !isValidISODate(dueDate)) return null;
+  return { kind, dueDate };
+}
+
+/**
+ * Every milestone key a patient's milestones can produce: NOE, HOPE admission,
+ * HUV1/HUV2 window ends, each period's recert (period end) and each required F2F (due-by).
+ */
+export function allMilestoneKeys(milestones: Milestones): string[] {
+  const keys = [
+    milestoneKey('noe', milestones.noeDueDate),
+    milestoneKey('hope_admission', milestones.hopeAdmissionDue),
+    milestoneKey('hope_huv1', milestones.hopeHuv1Window.end),
+    milestoneKey('hope_huv2', milestones.hopeHuv2Window.end),
+  ];
+  for (const p of milestones.benefitPeriods) {
+    keys.push(milestoneKey('recert', p.end));
+    if (p.f2fRequired && p.f2fDueBy) keys.push(milestoneKey('f2f', p.f2fDueBy));
+  }
+  return [...new Set(keys)];
+}
+
+/** Drops deadlines already reminded or already completed (`milestoneCompletions`). */
+export function unhandledDeadlines(
+  deadlines: readonly UpcomingDeadline[],
+  reminded: readonly string[] | null | undefined,
+  completions: Record<string, unknown> | null | undefined,
+): UpcomingDeadline[] {
+  const r = new Set(reminded ?? []);
+  const done = completions ?? {};
+  return deadlines.filter((d) => !r.has(d.key) && !Object.prototype.hasOwnProperty.call(done, d.key));
+}
+
+/** "On time": the org-local completion date is on or before the key's due date. */
+export function completedOnTime(key: string, completedLocalDate: ISODate): boolean | null {
+  const parsed = parseMilestoneKey(key);
+  return parsed ? compareISO(completedLocalDate, parsed.dueDate) <= 0 : null;
+}

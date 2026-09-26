@@ -52,8 +52,7 @@ export async function raiseAlert(params: RaiseAlertParams): Promise<RaiseAlertRe
   const targets = initialRecipients(params.targetUids, policy, () => roleUids);
   const ref = params.alertId ? docRef(paths.alert(params.orgId, params.alertId)) : colRef(paths.alerts(params.orgId)).doc();
   const now = FieldValue.serverTimestamp();
-  const patientId =
-    params.source.type === 'deadline' ? params.source.patientId : params.source.type === 'manual' ? params.source.patientId : null;
+  const patientId = 'patientId' in params.source ? params.source.patientId : null;
 
   const created = await db().runTransaction(async (tx) => {
     const existing = await tx.get(ref);

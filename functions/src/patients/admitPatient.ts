@@ -3,8 +3,10 @@ import { HttpsError, onCall, type CallableRequest } from 'firebase-functions/v2/
 import { z } from 'zod';
 import { normalizeUids, patientChannelName } from '../domain/channels';
 import { todayInTimeZone } from '../domain/dates';
+import { nextIdgDue } from '../domain/idg';
 import { computeMilestones } from '../domain/milestones';
 import { writeAudit } from '../lib/audit';
+import { appendPatientEvent, orgSettings, patientDisplayName, prepareTemplateTasks, txWriteTemplateTasks } from '../lib/care';
 import { CLINICAL_ROLES, parse, requireOrg } from '../lib/context';
 import { colRef, db, docRef, getDocData, paths } from '../lib/db';
 import { assertActiveMembers } from '../lib/members';
@@ -36,6 +38,8 @@ export async function admitPatientHandler(request: CallableRequest<AdmitPatientR
   if (!org) throw new HttpsError('not-found', 'Organization not found.');
   const today = todayInTimeZone(new Date(), org.timezone);
   const milestones = computeMilestones(input.admissionDate, input.startingBenefitPeriod, today);
+  const { idgCadenceDays } = orgSettings(org);
+  const admissionTasks = await prepareTemplateTasks(ctx.orgId, 'admission', input.admissionDate, careTeam);
 
   const patientRef = input.patientId ? docRef(paths.patient(ctx.orgId, input.patientId)) : colRef(paths.patients(ctx.orgId)).doc();
   const channelMembers = normalizeUids([...careTeam, ctx.uid]);
@@ -49,6 +53,9 @@ export async function admitPatientHandler(request: CallableRequest<AdmitPatientR
       throw new HttpsError('failed-precondition', `Cannot admit a patient with status "${existing.status}".`);
     }
     const now = FieldValue.serverTimestamp();
+    // Re-calling admitPatient for an already-admitted patient updates it without a new event or tasks.
+    const isNewAdmission = existing?.status !== 'admitted';
+    const readmit = existing && !isNewAdmission ? existing : null;
 
     let chId = existing?.channelId ?? null;
     if (chId) {
@@ -80,12 +87,28 @@ export async function admitPatientHandler(request: CallableRequest<AdmitPatientR
         consents: input.consents,
         milestones,
         remindedMilestones: existing?.remindedMilestones ?? [],
+        milestoneCompletions: readmit?.milestoneCompletions ?? {},
+        visitFrequencies: readmit?.visitFrequencies ?? [],
+        lastIdgReviewDate: readmit?.lastIdgReviewDate ?? null,
+        nextIdgDueDate: nextIdgDue(readmit?.lastIdgReviewDate ?? input.admissionDate, idgCadenceDays),
         createdBy: existing?.createdBy ?? ctx.uid,
         createdAt: existing?.createdAt ?? now,
         updatedAt: now,
       },
       { merge: false },
     );
+    let templateTasks = 0;
+    if (isNewAdmission) {
+      appendPatientEvent(tx, ctx.orgId, patientRef.id, {
+        type: 'admission',
+        date: input.admissionDate,
+        recordedBy: ctx.uid,
+        summary: `Admitted (${input.levelOfCare === 'gip' ? 'GIP' : input.levelOfCare}, benefit period ${input.startingBenefitPeriod})`,
+        details: { levelOfCare: input.levelOfCare, startingBenefitPeriod: input.startingBenefitPeriod, careTeamUids: careTeam },
+      });
+      const name = patientDisplayName(input.patient);
+      templateTasks = txWriteTemplateTasks(tx, ctx.orgId, 'admission', admissionTasks, { id: patientRef.id, name }, ctx.uid).length;
+    }
     await writeAudit(
       ctx.orgId,
       {
@@ -94,7 +117,7 @@ export async function admitPatientHandler(request: CallableRequest<AdmitPatientR
         resourceType: 'patient',
         resourceId: patientRef.id,
         patientId: patientRef.id,
-        metadata: { readmission: existing?.status === 'admitted', channelId: chId, careTeam: careTeam.length },
+        metadata: { readmission: !isNewAdmission, channelId: chId, careTeam: careTeam.length, tasks: templateTasks },
       },
       tx,
     );
