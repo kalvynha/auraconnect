@@ -38,14 +38,20 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
 }
 
 const root = createRoot(document.getElementById('root')!);
-const missing = REQUIRED_ENV.filter((k) => !import.meta.env[k]);
+const isBlank = (v: unknown) => typeof v !== 'string' || !v.trim() || v === 'undefined' || v.startsWith('your-');
+const missing: string[] = REQUIRED_ENV.filter((k) => isBlank(import.meta.env[k]));
+const apiKey = String(import.meta.env.VITE_FIREBASE_API_KEY ?? '');
+// Browser API keys are always "AIza" + 35 characters; anything else is a copy/paste or config problem.
+if (!missing.includes('VITE_FIREBASE_API_KEY') && !/^AIza[0-9A-Za-z_-]{35}$/.test(apiKey)) {
+  missing.push(`VITE_FIREBASE_API_KEY (got "${apiKey.slice(0, 8)}…", ${apiKey.length} chars; expected AIza… with 39 chars)`);
+}
 
 if (missing.length > 0) {
   // Firebase would throw at import time without config, leaving a blank page.
   root.render(
     <Problem title="Firebase is not configured">
       <p className="muted">
-        This build is missing {missing.join(', ')}. Create <code>web/.env.local</code> with your Firebase web app
+        This build has missing or invalid values: {missing.join(', ')}. Create <code>web/.env.local</code> with your Firebase web app
         config (see <code>web/.env.example</code>), then run <code>npm run build</code> and deploy again.
       </p>
     </Problem>,
