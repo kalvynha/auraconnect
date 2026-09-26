@@ -89,10 +89,49 @@ export async function runExtraction(
     });
     return 'needs_review';
   } catch (e) {
-    const publicMessage = e instanceof ExtractionError ? e.publicMessage : 'Extraction failed. Try again or enter the referral manually.';
-    // Log only the error class/code: model errors can echo document content.
-    logger.error('referral extraction failed', { orgId, referralId, code: e instanceof ExtractionError ? e.code : (e as Error)?.name });
+    const { publicMessage, logFields } = describeExtractionError(e);
+    logger.error('referral extraction failed', { orgId, referralId, ...logFields });
     await ref.update({ status: 'failed', error: publicMessage, updatedAt: FieldValue.serverTimestamp() });
     return 'failed';
   }
+}
+
+/**
+ * Turns an extraction failure into a user-facing message and safe log fields.
+ * Vertex AI API errors (ApiError) describe configuration problems and never echo
+ * document content, so their status and message are logged; anything else is
+ * logged by class name only, because model output can contain PHI.
+ */
+export function describeExtractionError(e: unknown): { publicMessage: string; logFields: Record<string, unknown> } {
+  if (e instanceof ExtractionError) return { publicMessage: e.publicMessage, logFields: { code: e.code } };
+  const status = typeof (e as { status?: unknown })?.status === 'number' ? (e as { status: number }).status : null;
+  if (status !== null) {
+    const message = String((e as Error).message ?? '').slice(0, 300);
+    const logFields = { code: 'vertex_api_error', status, message };
+    if (status === 401 || status === 403) {
+      return {
+        logFields,
+        publicMessage:
+          'AI extraction is not set up: the Cloud Functions service account lacks Vertex AI access (roles/aiplatform.user) or the Vertex AI API is disabled. Enter the referral manually, or ask your admin to fix the setup and retry.',
+      };
+    }
+    if (status === 404) {
+      return {
+        logFields,
+        publicMessage:
+          'AI extraction is not set up: the configured Gemini model (GEMINI_MODEL) is not available in VERTEX_LOCATION. Enter the referral manually, or ask your admin to fix the setup and retry.',
+      };
+    }
+    if (status === 429) {
+      return { logFields, publicMessage: 'The AI service is busy (quota exceeded). Retry in a minute.' };
+    }
+    if (status === 400) {
+      return { logFields, publicMessage: 'The AI service rejected this file (it may be too large or unreadable). Enter the referral manually.' };
+    }
+    return { logFields, publicMessage: `The AI service returned an error (${status}). Retry, or enter the referral manually.` };
+  }
+  return {
+    publicMessage: 'Extraction failed. Try again or enter the referral manually.',
+    logFields: { code: (e as Error)?.name ?? 'unknown' },
+  };
 }
