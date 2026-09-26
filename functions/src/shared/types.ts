@@ -63,9 +63,28 @@ export interface Org {
   deadlineLeadDays: number;
   /** Escalation policy applied to urgent/critical messages and deadline alerts. */
   defaultEscalationPolicyId: string | null;
+  /**
+   * Optional org settings added in v2. Absent on older orgs — readers must apply the
+   * defaults shown (see `ORG_SETTING_DEFAULTS`).
+   */
+  /** On-call role that after-hours triage calls route to (default `null` → caller picks). */
+  triageRoleKey?: string | null;
+  /** Days between IDG plan-of-care reviews (CMS: at least every 15 days). Default 15. */
+  idgCadenceDays?: number;
+  /** A scheduled visit becomes `missed` this many minutes after its end. Default 120. */
+  missedVisitGraceMinutes?: number;
+  /** Messages older than this are purged daily; null = keep forever (default). */
+  messageLifespanDays?: number | null;
   createdBy: string;
   createdAt: TimestampLike;
 }
+
+export const ORG_SETTING_DEFAULTS = {
+  triageRoleKey: null as string | null,
+  idgCadenceDays: 15,
+  missedVisitGraceMinutes: 120,
+  messageLifespanDays: null as number | null,
+};
 
 /** `orgs/{orgId}/members/{uid}` */
 export interface Member {
@@ -116,7 +135,8 @@ export interface UserOrg {
 // Messaging
 // ---------------------------------------------------------------------------
 
-export type ChannelType = 'direct' | 'group' | 'patient' | 'team';
+/** `broadcast`: only the creator can post; recipients read (and get pushed) but cannot reply. */
+export type ChannelType = 'direct' | 'group' | 'patient' | 'team' | 'broadcast';
 export type Priority = 'normal' | 'urgent' | 'critical';
 export const PRIORITIES: readonly Priority[] = ['normal', 'urgent', 'critical'];
 
@@ -165,7 +185,24 @@ export interface Message {
   createdAt: TimestampLike;
   /** Set by the backend when an urgent/critical message raised an alert. */
   alertId: string | null;
+  // --- v2 (all optional on read; old messages lack them) ---
+  /**
+   * Thread replies point at their parent message id. Clients MAY include it on create
+   * (string or null). Channel timelines show messages where this is absent/null.
+   */
+  threadParentId?: string | null;
+  /** Backend-maintained on parent messages: number of thread replies. */
+  replyCount?: number;
+  /** Backend-maintained on parent messages. */
+  lastReplyAt?: TimestampLike | null;
+  /** Set by `recallMessage`; body/attachments are then emptied. Clients show "Message recalled". */
+  recalledAt?: TimestampLike | null;
 }
+
+/** Fields a client writes when creating a message. `threadParentId` is optional. */
+export const MESSAGE_CREATE_KEYS = [
+  'senderUid', 'senderName', 'body', 'priority', 'attachments', 'roleTarget', 'createdAt', 'alertId',
+] as const;
 
 /** `orgs/{orgId}/channels/{channelId}/reads/{uid}` — read receipts. */
 export interface ReadReceipt {
@@ -217,7 +254,9 @@ export type AlertStatus = 'open' | 'acked' | 'resolved';
 export type AlertSource =
   | { type: 'message'; channelId: string; messageId: string }
   | { type: 'deadline'; patientId: string; milestone: MilestoneKind; dueDate: ISODate }
-  | { type: 'manual'; patientId: string | null };
+  | { type: 'manual'; patientId: string | null }
+  | { type: 'triage'; callId: string; patientId: string | null }
+  | { type: 'visit_missed'; visitId: string; patientId: string };
 
 export interface AlertEscalationEvent {
   level: number;
@@ -367,6 +406,22 @@ export interface Patient extends PatientInput {
   milestones: Milestones | null;
   /** Milestone keys (e.g. `noe:2026-10-01`) for which reminder alerts were already raised. */
   remindedMilestones: string[];
+  // --- v2 (optional on read) ---
+  /**
+   * Completed/filed milestones keyed by milestone key (`{kind}:{dueDate}`, same format as
+   * `remindedMilestones`). `checkDeadlines` never alerts on a completed key.
+   */
+  milestoneCompletions?: Record<string, MilestoneCompletion>;
+  /** Planned visit frequency per discipline. */
+  visitFrequencies?: VisitFrequency[];
+  /** Last IDG plan-of-care review (set when an IDG meeting that reviewed the patient completes). */
+  lastIdgReviewDate?: ISODate | null;
+  /** lastIdgReviewDate (or admissionDate) + org.idgCadenceDays. */
+  nextIdgDueDate?: ISODate | null;
+  dischargeDate?: ISODate | null;
+  dischargeReason?: DischargeReason | null;
+  death?: DeathRecord | null;
+  bereavementPlanId?: string | null;
   createdBy: string;
   createdAt: TimestampLike;
   updatedAt: TimestampLike;
@@ -438,7 +493,38 @@ export type AuditAction =
   | 'alert.create'
   | 'alert.ack'
   | 'alert.resolve'
-  | 'alert.escalate';
+  | 'alert.escalate'
+  // v2
+  | 'milestone.complete'
+  | 'milestone.reopen'
+  | 'patient.level_of_care'
+  | 'patient.recertify'
+  | 'patient.discharge'
+  | 'patient.death'
+  | 'visit.schedule'
+  | 'visit.update'
+  | 'visit.complete'
+  | 'visit.cancel'
+  | 'visit.missed'
+  | 'task.create'
+  | 'task.update'
+  | 'task.complete'
+  | 'bereavement.update'
+  | 'idg.create'
+  | 'idg.update'
+  | 'idg.complete'
+  | 'idg.ai_prep'
+  | 'triage.log'
+  | 'triage.assign'
+  | 'triage.resolve'
+  | 'document.upload'
+  | 'message.recall'
+  | 'message.search'
+  | 'broadcast.send'
+  | 'ai.summarize_channel'
+  | 'ai.handoff'
+  | 'volunteer.assign'
+  | 'volunteer.log';
 
 /** `orgs/{orgId}/auditLogs/{id}` — written only by Cloud Functions. */
 export interface AuditLog {
@@ -529,3 +615,421 @@ export interface PushData {
   alertId?: string;
   priority: Priority;
 }
+
+// ===========================================================================
+// v2 — Tier 1: lifecycle, milestones, visits, tasks, bereavement
+// ===========================================================================
+
+export interface MilestoneCompletion {
+  completedAt: TimestampLike;
+  completedBy: string;
+  note: string | null;
+}
+
+export type DischargeReason =
+  | 'revocation'
+  | 'transfer'
+  | 'no_longer_terminally_ill'
+  | 'moved_out_of_area'
+  | 'for_cause'
+  | 'other';
+
+export interface DeathRecord {
+  date: ISODate;
+  /** Local time `HH:mm` in the org time zone. */
+  time: string | null;
+  pronouncedBy: string | null;
+  location: string | null;
+  notes: string | null;
+}
+
+export type PatientEventType =
+  | 'admission'
+  | 'level_of_care_change'
+  | 'recertification'
+  | 'discharge'
+  | 'death';
+
+/** `orgs/{orgId}/patients/{patientId}/events/{eventId}` — timeline, written only by functions. */
+export interface PatientEvent {
+  type: PatientEventType;
+  /** Effective date of the event. */
+  date: ISODate;
+  recordedBy: string;
+  createdAt: TimestampLike;
+  /** Human-readable one-liner shown in the timeline, e.g. "Level of care: routine → GIP". */
+  summary: string;
+  details: Record<string, unknown>;
+}
+
+export interface VisitFrequency {
+  discipline: Discipline;
+  /** Planned visits per week (may be fractional, e.g. 0.5 = every other week). */
+  perWeek: number;
+  notes: string | null;
+}
+
+export type VisitStatus = 'scheduled' | 'completed' | 'missed' | 'cancelled';
+
+/** `orgs/{orgId}/visits/{visitId}` — written only by functions. */
+export interface Visit {
+  patientId: string;
+  /** Denormalized "Last, First" for lists (PHI stays in Firestore; never in pushes). */
+  patientName: string;
+  discipline: Discipline;
+  assignedUid: string | null;
+  scheduledStart: TimestampLike;
+  scheduledEnd: TimestampLike;
+  status: VisitStatus;
+  note: string | null;
+  completedAt: TimestampLike | null;
+  completedBy: string | null;
+  cancelledReason: string | null;
+  createdBy: string;
+  createdAt: TimestampLike;
+  updatedAt: TimestampLike;
+}
+
+export type TaskStatus = 'open' | 'done' | 'cancelled';
+export type TaskTemplateEvent = 'admission' | 'recertification' | 'discharge' | 'death';
+
+export type TaskSource =
+  | { type: 'manual' }
+  | { type: 'template'; event: TaskTemplateEvent }
+  | { type: 'idg'; meetingId: string }
+  | { type: 'triage'; callId: string };
+
+/** `orgs/{orgId}/tasks/{taskId}` — written only by functions. */
+export interface Task {
+  title: string;
+  description: string | null;
+  patientId: string | null;
+  patientName: string | null;
+  assigneeUid: string | null;
+  /** Used when unassigned: anyone on the care team with this discipline may pick it up. */
+  discipline: Discipline | null;
+  dueDate: ISODate | null;
+  priority: Priority;
+  status: TaskStatus;
+  source: TaskSource;
+  createdBy: string;
+  createdAt: TimestampLike;
+  completedAt: TimestampLike | null;
+  completedBy: string | null;
+  updatedAt: TimestampLike;
+}
+
+export interface TaskTemplateItem {
+  title: string;
+  description: string | null;
+  /** Assigned to the patient's care-team member with this discipline, if any. */
+  discipline: Discipline | null;
+  /** Due date = event date + offsetDays. */
+  offsetDays: number;
+  priority: Priority;
+}
+
+/** `orgs/{orgId}/taskTemplates/{event}` — admin-editable; defaults created by `createOrg`/lazily. */
+export interface TaskTemplate {
+  event: TaskTemplateEvent;
+  items: TaskTemplateItem[];
+}
+
+export type BereavementContactType = 'call' | 'letter' | 'visit' | 'mailing';
+export type BereavementContactStatus = 'pending' | 'done' | 'skipped';
+
+export interface BereavementContact {
+  id: string;
+  type: BereavementContactType;
+  label: string;
+  dueDate: ISODate;
+  status: BereavementContactStatus;
+  completedAt: TimestampLike | null;
+  completedBy: string | null;
+  note: string | null;
+}
+
+/** `orgs/{orgId}/bereavementPlans/{planId}` — created by `recordDeath`; 13-month follow-up. */
+export interface BereavementPlan {
+  patientId: string;
+  patientName: string;
+  deathDate: ISODate;
+  primaryContact: Caregiver | null;
+  riskLevel: 'low' | 'moderate' | 'high';
+  assignedUid: string | null;
+  contacts: BereavementContact[];
+  status: 'active' | 'closed';
+  /** deathDate + 13 months. */
+  closesOn: ISODate;
+  createdAt: TimestampLike;
+  updatedAt: TimestampLike;
+}
+
+// ===========================================================================
+// v2 — Tier 2: IDG meetings, after-hours triage, patient documents
+// ===========================================================================
+
+export interface IdgActionItem {
+  title: string;
+  assigneeUid: string | null;
+  dueDate: ISODate | null;
+}
+
+export interface IdgPatientNote {
+  summary: string;
+  planOfCareChanges: string | null;
+  goalsOfCare: string | null;
+  actionItems: IdgActionItem[];
+  reviewed: boolean;
+  updatedBy: string;
+  updatedAt: TimestampLike;
+}
+
+export interface IdgAiPrep {
+  text: string;
+  model: string;
+  generatedAt: TimestampLike;
+}
+
+/** `orgs/{orgId}/idgMeetings/{meetingId}` — written only by functions. */
+export interface IdgMeeting {
+  title: string;
+  teamId: string | null;
+  scheduledAt: TimestampLike;
+  status: 'scheduled' | 'completed';
+  attendeeUids: string[];
+  /** Agenda. Auto-populated with admitted patients whose nextIdgDueDate ≤ meeting date + 7 days. */
+  patientIds: string[];
+  /** Denormalized names keyed by patientId, for the agenda list. */
+  patientNames: Record<string, string>;
+  notes: Record<string, IdgPatientNote>;
+  /** AI-generated prep packets keyed by patientId (human must verify). */
+  aiPrep: Record<string, IdgAiPrep>;
+  createdBy: string;
+  createdAt: TimestampLike;
+  completedAt: TimestampLike | null;
+  completedBy: string | null;
+}
+
+export type TriageUrgency = 'routine' | 'urgent' | 'emergent';
+export type TriageDisposition =
+  | 'advice_given'
+  | 'visit_scheduled'
+  | 'visit_made'
+  | 'md_contacted'
+  | 'ems_911'
+  | 'other';
+
+/** `orgs/{orgId}/triageCalls/{callId}` — written only by functions. */
+export interface TriageCall {
+  patientId: string | null;
+  patientName: string | null;
+  callerName: string;
+  callerRelationship: string | null;
+  callerPhone: string | null;
+  reason: string;
+  symptoms: string[];
+  urgency: TriageUrgency;
+  status: 'open' | 'resolved';
+  assignedUid: string | null;
+  roleKey: string | null;
+  alertId: string | null;
+  disposition: TriageDisposition | null;
+  dispositionNote: string | null;
+  receivedAt: TimestampLike;
+  receivedBy: string;
+  resolvedAt: TimestampLike | null;
+  resolvedBy: string | null;
+}
+
+export type DocumentCategory = 'consent' | 'polst' | 'order' | 'referral' | 'plan_of_care' | 'other';
+
+/**
+ * `orgs/{orgId}/patients/{patientId}/documents/{documentId}`.
+ * Clients (admin/clinician/intake) create the doc, then upload to
+ * `orgs/{orgId}/patients/{patientId}/documents/{documentId}/{fileName}`.
+ * `acceptReferral` also adds the referral file here (category `referral`).
+ */
+export interface PatientDocument {
+  name: string;
+  category: DocumentCategory;
+  fileName: string;
+  storagePath: string;
+  contentType: string;
+  size: number;
+  uploadedBy: string;
+  createdAt: TimestampLike;
+}
+
+// ===========================================================================
+// v2 — Tier 3: messaging extras + AI
+// ===========================================================================
+
+export type BroadcastTarget =
+  | { kind: 'team'; teamId: string }
+  | { kind: 'role'; roleKey: string }
+  | { kind: 'discipline'; discipline: Discipline }
+  | { kind: 'all' };
+
+export interface MessageSearchHit {
+  channelId: string;
+  channelName: string | null;
+  messageId: string;
+  senderName: string;
+  /** ~160 chars around the match. */
+  snippet: string;
+  createdAt: TimestampLike;
+}
+
+export interface AiTextResult {
+  text: string;
+  model: string;
+  /** Always shown to users: AI output must be verified by a clinician. */
+  disclaimer: string;
+}
+
+// ===========================================================================
+// v2 — Tier 4: dashboards, volunteers
+// ===========================================================================
+
+/** `orgs/{orgId}/metrics/{YYYY-MM-DD}` — computed daily (and on demand) by functions. */
+export interface DailyMetrics {
+  date: ISODate;
+  census: { admitted: number; referral: number; dischargedToday: number; deathsToday: number };
+  levelOfCare: Record<LevelOfCare, number>;
+  alerts: { created: number; acked: number; medianAckMinutes: number | null; exhausted: number };
+  deadlines: { dueNext7Days: number; overdue: number; completedOnTime30d: number; completedLate30d: number };
+  visits: { scheduled: number; completed: number; missed: number; cancelled: number };
+  triage: { calls: number; emergent: number; medianResolveMinutes: number | null };
+  volunteers: { minutesLast30d: number; activeAssignments: number };
+  bereavement: { activePlans: number; contactsDueNext7Days: number; contactsOverdue: number };
+  computedAt: TimestampLike;
+}
+
+export type VolunteerActivity = 'companionship' | 'respite' | 'vigil' | 'errands' | 'bereavement' | 'admin' | 'other';
+
+/** `orgs/{orgId}/volunteerAssignments/{id}` — admin-managed. */
+export interface VolunteerAssignment {
+  volunteerUid: string;
+  patientId: string;
+  patientName: string;
+  activity: VolunteerActivity;
+  status: 'active' | 'ended';
+  startDate: ISODate;
+  endDate: ISODate | null;
+  notes: string | null;
+  createdBy: string;
+  createdAt: TimestampLike;
+}
+
+/** `orgs/{orgId}/volunteerLogs/{id}` — a volunteer logs their own time (CMS: volunteer hours ≥ 5% of patient-care hours). */
+export interface VolunteerLog {
+  volunteerUid: string;
+  patientId: string | null;
+  date: ISODate;
+  minutes: number;
+  activity: VolunteerActivity;
+  note: string | null;
+  createdAt: TimestampLike;
+}
+
+// ===========================================================================
+// v2 callables (region us-central1; every request carries orgId)
+// ===========================================================================
+
+export interface CompleteMilestoneRequest { orgId: string; patientId: string; key: string; note?: string }
+export interface ReopenMilestoneRequest { orgId: string; patientId: string; key: string }
+
+export interface ChangeLevelOfCareRequest {
+  orgId: string; patientId: string; levelOfCare: LevelOfCare; effectiveDate: ISODate; reason: string;
+}
+export interface RecordRecertificationRequest {
+  orgId: string; patientId: string;
+  /** Benefit period being certified (must exist in milestones.benefitPeriods). */
+  periodNumber: number;
+  certifyingPhysician: string;
+  certificationDate: ISODate;
+  /** Required when that period has f2fRequired. */
+  f2fDate?: ISODate;
+  f2fBy?: string;
+}
+export interface DischargePatientRequest {
+  orgId: string; patientId: string; dischargeDate: ISODate; reason: DischargeReason; notes?: string;
+}
+export interface RecordDeathRequest {
+  orgId: string; patientId: string; date: ISODate; time?: string; pronouncedBy?: string;
+  location?: string; notes?: string; bereavementRisk?: 'low' | 'moderate' | 'high'; bereavementAssigneeUid?: string;
+}
+
+export interface SetVisitFrequenciesRequest { orgId: string; patientId: string; frequencies: VisitFrequency[] }
+export interface ScheduleVisitRequest {
+  orgId: string; patientId: string; discipline: Discipline; assignedUid?: string | null;
+  /** ISO 8601 instants. */
+  start: string; end: string; note?: string;
+}
+export interface UpdateVisitRequest {
+  orgId: string; visitId: string; assignedUid?: string | null; start?: string; end?: string; note?: string | null;
+}
+export interface CompleteVisitRequest { orgId: string; visitId: string; note?: string }
+export interface CancelVisitRequest { orgId: string; visitId: string; reason: string }
+
+export interface CreateTaskRequest {
+  orgId: string; title: string; description?: string; patientId?: string; assigneeUid?: string;
+  discipline?: Discipline; dueDate?: ISODate; priority?: Priority;
+}
+export interface UpdateTaskRequest {
+  orgId: string; taskId: string; title?: string; description?: string | null; assigneeUid?: string | null;
+  dueDate?: ISODate | null; priority?: Priority; status?: TaskStatus;
+}
+export interface SaveTaskTemplateRequest { orgId: string; event: TaskTemplateEvent; items: TaskTemplateItem[] }
+
+export interface UpdateBereavementContactRequest {
+  orgId: string; planId: string; contactId: string; status: BereavementContactStatus; note?: string;
+}
+export interface UpdateBereavementPlanRequest {
+  orgId: string; planId: string; assignedUid?: string | null; riskLevel?: 'low' | 'moderate' | 'high'; status?: 'active' | 'closed';
+}
+
+export interface CreateIdgMeetingRequest {
+  orgId: string; title: string; scheduledAt: string; teamId?: string; attendeeUids?: string[];
+  /** Omit to auto-populate with patients due for review. */
+  patientIds?: string[];
+}
+export interface UpdateIdgMeetingRequest {
+  orgId: string; meetingId: string; title?: string; scheduledAt?: string; attendeeUids?: string[]; patientIds?: string[];
+}
+export interface SaveIdgNoteRequest {
+  orgId: string; meetingId: string; patientId: string; summary: string; planOfCareChanges?: string | null;
+  goalsOfCare?: string | null; actionItems?: IdgActionItem[]; reviewed: boolean;
+}
+export interface CompleteIdgMeetingRequest { orgId: string; meetingId: string }
+export interface GenerateIdgPrepRequest { orgId: string; meetingId: string; patientId?: string }
+
+export interface LogTriageCallRequest {
+  orgId: string; patientId?: string; callerName: string; callerRelationship?: string; callerPhone?: string;
+  reason: string; symptoms?: string[]; urgency: TriageUrgency;
+  /** Defaults to org.triageRoleKey. Emergent/urgent calls raise an escalating alert to the on-call person. */
+  roleKey?: string; assignedUid?: string;
+}
+export interface LogTriageCallResponse { callId: string; assignedUid: string | null; alertId: string | null }
+export interface AssignTriageCallRequest { orgId: string; callId: string; assignedUid: string }
+export interface ResolveTriageCallRequest {
+  orgId: string; callId: string; disposition: TriageDisposition; dispositionNote?: string;
+  /** Optional follow-up task. */
+  followUpTask?: { title: string; assigneeUid?: string; dueDate?: ISODate };
+}
+
+export interface RecallMessageRequest { orgId: string; channelId: string; messageId: string }
+export interface SearchMessagesRequest { orgId: string; query: string; channelId?: string }
+export interface SearchMessagesResponse { hits: MessageSearchHit[]; truncated: boolean }
+export interface SendBroadcastRequest { orgId: string; name: string; target: BroadcastTarget; body: string; priority: Priority }
+export interface SendBroadcastResponse { channelId: string; messageId: string; recipientCount: number }
+
+export interface SummarizeChannelRequest { orgId: string; channelId: string; sinceHours?: number }
+export interface GenerateHandoffRequest { orgId: string; sinceHours?: number; patientIds?: string[] }
+
+export interface ComputeMetricsRequest { orgId: string }
+export interface ComputeMetricsResponse { metrics: DailyMetrics }
+
+/** Generic id response used by create* callables. */
+export interface IdResponse { id: string }
