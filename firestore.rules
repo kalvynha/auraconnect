@@ -14,8 +14,10 @@ rules_version = '2';
 //  - Cloud Functions use the Admin SDK and bypass these rules; everything that
 //    is "server only" in the contract is simply `allow write: if false`.
 //  - get() budget: at most 2 distinct documents are read per request
-//    (the caller's member doc and, for channel subcollections, the channel).
-//    Repeated get() of the same path is cached and billed once.
+//    (the caller's member doc plus at most one of: the channel for channel
+//    subcollections, the escalation policy on org update, or the parent
+//    patient on document create). Repeated get() of the same path is cached
+//    and billed once.
 
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -95,6 +97,33 @@ service cloud.firestore {
       return v in ['normal', 'urgent', 'critical'];
     }
 
+    // ISO calendar date `YYYY-MM-DD` (format only; calendar validity is not checked).
+    function isIsoDate(v) {
+      return v is string && v.matches('[0-9]{4}-[0-9]{2}-[0-9]{2}');
+    }
+
+    function isIntInRange(v, lo, hi) {
+      return v is int && v >= lo && v <= hi;
+    }
+
+    // A single path segment usable as a Storage object name.
+    function isFileName(v) {
+      return isNonEmptyString(v, 255) && v.matches('[^/]+') && v != '.' && v != '..';
+    }
+
+    function isPdfOrImage(v) {
+      return v is string && (v == 'application/pdf' || v.matches('image/.*'));
+    }
+
+    function isVolunteerActivity(v) {
+      return v in ['companionship', 'respite', 'vigil', 'errands', 'bereavement', 'admin', 'other'];
+    }
+
+    // Clinical roles per DATA_MODEL v2: admin, clinician, intake.
+    function isClinical(orgId) {
+      return hasRole(orgId, ['admin', 'clinician', 'intake']);
+    }
+
     // ---------------------------------------------------------------------
     // userOrgs/{uid} — org lookup before claims refresh. Server-written.
     // ---------------------------------------------------------------------
@@ -110,9 +139,13 @@ service cloud.firestore {
       allow read: if isActiveMember(orgId);
 
       // Created by `createOrg`; admins may only edit settings.
+      // v2 settings are optional on the doc: `get(key, default)` validates
+      // them when present and lets admins remove them (back to the default).
       allow create, delete: if false;
       allow update: if isAdmin(orgId)
-        && onlyChanged(['name', 'timezone', 'deadlineLeadDays', 'defaultEscalationPolicyId'])
+        && onlyChanged(['name', 'timezone', 'deadlineLeadDays', 'defaultEscalationPolicyId',
+                        'triageRoleKey', 'idgCadenceDays', 'missedVisitGraceMinutes',
+                        'messageLifespanDays'])
         && isNonEmptyString(incoming().name, 200)
         && isNonEmptyString(incoming().timezone, 64)
         && incoming().deadlineLeadDays is int
@@ -120,7 +153,13 @@ service cloud.firestore {
         && incoming().deadlineLeadDays <= 90
         && (incoming().defaultEscalationPolicyId == null
             || (incoming().defaultEscalationPolicyId is string
-                && exists(/databases/$(database)/documents/orgs/$(orgId)/escalationPolicies/$(incoming().defaultEscalationPolicyId))));
+                && exists(/databases/$(database)/documents/orgs/$(orgId)/escalationPolicies/$(incoming().defaultEscalationPolicyId))))
+        && (incoming().get('triageRoleKey', null) == null
+            || isNonEmptyString(incoming().get('triageRoleKey', null), 128))
+        && isIntInRange(incoming().get('idgCadenceDays', 15), 1, 30)
+        && isIntInRange(incoming().get('missedVisitGraceMinutes', 120), 15, 1440)
+        && (incoming().get('messageLifespanDays', null) == null
+            || isIntInRange(incoming().get('messageLifespanDays', null), 7, 3650));
 
       // -------------------------------------------------------------------
       // members/{uid} — created by `createOrg` / `acceptInvite`.
@@ -232,14 +271,24 @@ service cloud.firestore {
 
         // Clients write messages directly (offline-friendly); functions
         // fill in alertId and the channel's lastMessage.
+        // v2: optional `threadParentId` (string or null) on create; in a
+        // `broadcast` channel only its creator may post. The parent message
+        // is not looked up here (get() budget); onMessageCreated handles it.
         match /messages/{messageId} {
           allow read: if isChannelMember();
 
           allow create: if isChannelMember()
             && canPost(orgId)
             && channelDoc().data.archived != true
-            && exactKeys(['senderUid', 'senderName', 'body', 'priority',
-                          'attachments', 'roleTarget', 'createdAt', 'alertId'])
+            && (channelDoc().data.type != 'broadcast'
+                || channelDoc().data.createdBy == request.auth.uid)
+            && incoming().keys().hasAll(['senderUid', 'senderName', 'body', 'priority',
+                                         'attachments', 'roleTarget', 'createdAt', 'alertId'])
+            && incoming().keys().hasOnly(['senderUid', 'senderName', 'body', 'priority',
+                                          'attachments', 'roleTarget', 'createdAt', 'alertId',
+                                          'threadParentId'])
+            && (incoming().get('threadParentId', null) == null
+                || isNonEmptyString(incoming().get('threadParentId', null), 128))
             && incoming().senderUid == request.auth.uid
             && isNonEmptyString(incoming().senderName, 200)
             && incoming().body is string
@@ -281,6 +330,128 @@ service cloud.firestore {
       match /patients/{patientId} {
         allow read: if isActiveMember(orgId);
         allow write: if false;
+
+        // Timeline events — written only by functions.
+        match /events/{eventId} {
+          allow read: if isActiveMember(orgId);
+          allow write: if false;
+        }
+
+        // Patient documents: a clinical user creates the record, then
+        // uploads the file to `storagePath`. Write-once from clients.
+        // get() budget: member doc + parent patient existence.
+        match /documents/{documentId} {
+          allow read: if isActiveMember(orgId);
+
+          allow create: if isClinical(orgId)
+            && exists(/databases/$(database)/documents/orgs/$(orgId)/patients/$(patientId))
+            && exactKeys(['name', 'category', 'fileName', 'storagePath', 'contentType',
+                          'size', 'uploadedBy', 'createdAt'])
+            && isNonEmptyString(incoming().name, 200)
+            && incoming().category in ['consent', 'polst', 'order', 'referral', 'plan_of_care', 'other']
+            && isFileName(incoming().fileName)
+            && incoming().storagePath == 'orgs/' + orgId + '/patients/' + patientId
+                 + '/documents/' + documentId + '/' + incoming().fileName
+            && isPdfOrImage(incoming().contentType)
+            && incoming().size is int
+            && incoming().size > 0
+            && incoming().size < 25 * 1024 * 1024
+            && incoming().uploadedBy == request.auth.uid
+            && incoming().createdAt == request.time;
+
+          allow update, delete: if false;
+        }
+      }
+
+      // -------------------------------------------------------------------
+      // v2 care workflows — read by members, written only by functions
+      // (visits, tasks, templates, bereavement, IDG, triage).
+      // -------------------------------------------------------------------
+      match /visits/{visitId} {
+        allow read: if isActiveMember(orgId);
+        allow write: if false;
+      }
+
+      match /tasks/{taskId} {
+        allow read: if isActiveMember(orgId);
+        allow write: if false;
+      }
+
+      // Edited through the admin-only `saveTaskTemplate` callable.
+      match /taskTemplates/{event} {
+        allow read: if isActiveMember(orgId);
+        allow write: if false;
+      }
+
+      match /bereavementPlans/{planId} {
+        allow read: if isActiveMember(orgId);
+        allow write: if false;
+      }
+
+      match /idgMeetings/{meetingId} {
+        allow read: if isActiveMember(orgId);
+        allow write: if false;
+      }
+
+      match /triageCalls/{callId} {
+        allow read: if isActiveMember(orgId);
+        allow write: if false;
+      }
+
+      // Dashboards: admin only.
+      match /metrics/{date} {
+        allow read: if isAdmin(orgId);
+        allow write: if false;
+      }
+
+      // -------------------------------------------------------------------
+      // Volunteers
+      // -------------------------------------------------------------------
+      function isVolunteerAssignment() {
+        return exactKeys(['volunteerUid', 'patientId', 'patientName', 'activity', 'status',
+                          'startDate', 'endDate', 'notes', 'createdBy', 'createdAt'])
+          && isNonEmptyString(incoming().volunteerUid, 128)
+          && isNonEmptyString(incoming().patientId, 128)
+          && isNonEmptyString(incoming().patientName, 200)
+          && isVolunteerActivity(incoming().activity)
+          && incoming().status in ['active', 'ended']
+          && isIsoDate(incoming().startDate)
+          && (incoming().endDate == null
+              || (isIsoDate(incoming().endDate) && incoming().endDate >= incoming().startDate))
+          && isStringOrNull(incoming().notes, 2000);
+      }
+
+      // Admin-managed. createdBy/createdAt are stamped on create and immutable.
+      match /volunteerAssignments/{assignmentId} {
+        allow read: if isActiveMember(orgId);
+        allow create: if isAdmin(orgId)
+          && isVolunteerAssignment()
+          && incoming().createdBy == request.auth.uid
+          && incoming().createdAt == request.time;
+        allow update: if isAdmin(orgId)
+          && isVolunteerAssignment()
+          && incoming().createdBy == resource.data.createdBy
+          && incoming().createdAt == resource.data.createdAt;
+        allow delete: if isAdmin(orgId);
+      }
+
+      // Any active member logs their own time; admins read all logs,
+      // others only their own (list queries must filter volunteerUid == uid).
+      match /volunteerLogs/{logId} {
+        allow read: if isAdmin(orgId)
+          || (isActiveMember(orgId) && resource.data.volunteerUid == request.auth.uid);
+
+        allow create: if isActiveMember(orgId)
+          && exactKeys(['volunteerUid', 'patientId', 'date', 'minutes', 'activity', 'note', 'createdAt'])
+          && incoming().volunteerUid == request.auth.uid
+          && (incoming().patientId == null || isNonEmptyString(incoming().patientId, 128))
+          && isIsoDate(incoming().date)
+          && isIntInRange(incoming().minutes, 1, 1440)
+          && isVolunteerActivity(incoming().activity)
+          && isStringOrNull(incoming().note, 2000)
+          && incoming().createdAt == request.time;
+
+        allow update, delete: if false;
       }
 
       // -------------------------------------------------------------------

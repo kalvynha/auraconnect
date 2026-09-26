@@ -2,7 +2,7 @@ rules_version = '2';
 
 // AuraConnect Cloud Storage security rules.
 //
-// Contract: docs/DATA_MODEL.md ("Storage" table).
+// Contract: docs/DATA_MODEL.md ("Storage" table and the v2 "New Storage path").
 //  - Claims {orgId, role} are the primary gate. Cross-service Firestore reads
 //    additionally require an active member doc (immediate revocation) and,
 //    for attachments, membership of the channel.
@@ -71,6 +71,20 @@ service firebase.storage {
         && isChannelMember()
         && hasRole(orgId, ['admin', 'clinician', 'intake'])
         && underMaxSize();
+      allow update, delete: if false;
+    }
+
+    // Patient documents (consents, POLST, orders, plan of care…). The
+    // Firestore record at orgs/{orgId}/patients/{patientId}/documents/{docId}
+    // is created first; the file is then uploaded here.
+    match /orgs/{orgId}/patients/{patientId}/documents/{docId}/{fileName} {
+      allow read: if isActiveMember(orgId);
+      allow create: if isNewObject()
+        && hasRole(orgId, ['admin', 'clinician', 'intake'])
+        && underMaxSize()
+        && request.resource.contentType != null
+        && (request.resource.contentType == 'application/pdf'
+            || request.resource.contentType.matches('image/.*'));
       allow update, delete: if false;
     }
 
