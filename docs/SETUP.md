@@ -64,7 +64,16 @@ It's safe to re-run. You still sign the BAA, upload the APNs key, turn on MFA an
     - Sign in to the web console, create the organization, and invite staff.
     - Set up on-call roles, shifts, and the default escalation policy.
 
-## 3. Security checklist before real PHI
+## 3. Inviting your team
+1. **Invite.** In the web console, open **Members → Invite a member**. Enter the email, name, role and discipline. Firebase emails the person a sign-in link: a **Firebase Auth email-link** message with no PHI, sent by Firebase itself. **Resend email** is on the pending-invites list.
+   - iOS admins can invite from **More → Members**. The share sheet opens with a message to text or email.
+2. **Accept.** The invitee opens the link. It confirms their email (which also verifies it) and asks them to set a password for the iOS app. Then they tap **Accept** on the welcome screen.
+3. **Prerequisites** (`gcp-setup.sh` does the first one):
+   - **Authentication → Sign-in method → Email/Password → Email link (passwordless sign-in)** is on.
+   - The console's domain is listed under **Authentication → Settings → Authorized domains**. `localhost` and `<project>.web.app` are included by default.
+   - Optionally, edit the email text under **Authentication → Templates**.
+
+## 4. Security checklist before real PHI
 - [ ] BAA signed. Every vendor that touches PHI is covered.
 - [ ] MFA required for all users. Session and app-lock timeouts agreed with compliance.
 - [ ] Firestore and Storage rules deployed. `tests/rules` pass in CI.

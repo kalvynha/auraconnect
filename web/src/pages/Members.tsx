@@ -8,6 +8,7 @@ import { call } from '../lib/firebase';
 import { DISCIPLINES, ROLES } from '../lib/constants';
 import { errorMessage, formatInstant } from '../lib/format';
 import { setMemberTeams } from '../lib/teams';
+import { sendInvitationEmail } from '../lib/invites';
 import { Badge, Button, Card, ErrorBanner, Field, Modal, Page, Table } from '../components/ui';
 
 function TeamsEditor({
@@ -68,6 +69,25 @@ function TeamsEditor({
   );
 }
 
+function ResendButton({ email }: { email: string }) {
+  const [state, setState] = useState<'idle' | 'busy' | 'sent' | 'error'>('idle');
+  async function resend() {
+    setState('busy');
+    try {
+      await sendInvitationEmail(email);
+      setState('sent');
+    } catch {
+      setState('error');
+    }
+  }
+  if (state === 'sent') return <span className="muted small">Sent</span>;
+  return (
+    <Button small variant="ghost" busy={state === 'busy'} onClick={() => void resend()}>
+      {state === 'error' ? 'Retry email' : 'Resend email'}
+    </Button>
+  );
+}
+
 function InviteForm({ teams }: { teams: WithId<Team>[] }) {
   const s = useOrgSession();
   const [email, setEmail] = useState('');
@@ -85,15 +105,24 @@ function InviteForm({ teams }: { teams: WithId<Team>[] }) {
     setError(null);
     setOk(null);
     try {
+      const inviteEmail = email.trim().toLowerCase();
       await call<InviteMemberRequest, InviteMemberResponse>('inviteMember', {
         orgId: s.orgId,
-        email: email.trim().toLowerCase(),
+        email: inviteEmail,
         displayName: displayName.trim(),
         role,
         discipline,
         teamIds,
       });
-      setOk(`Invitation created for ${email.trim()}. They can accept it after signing in with that email.`);
+      try {
+        await sendInvitationEmail(inviteEmail);
+        setOk(`Invitation emailed to ${inviteEmail}.`);
+      } catch (mailErr) {
+        setOk(
+          `Invitation created for ${inviteEmail}, but the email could not be sent (${errorMessage(mailErr)}). ` +
+            'Ask them to sign up with that email, or use "Resend email" below.',
+        );
+      }
       setEmail('');
       setDisplayName('');
       setTeamIds([]);
@@ -242,6 +271,7 @@ export default function MembersPage() {
             { header: 'Discipline', cell: (i) => i.discipline },
             { header: 'Invited by', cell: (i) => s.memberName(i.createdBy) },
             { header: 'Created', cell: (i) => formatInstant(i.createdAt) },
+            { header: '', cell: (i) => <ResendButton email={i.email} /> },
           ]}
         />
       </Card>

@@ -123,8 +123,8 @@ else
   esac
 fi
 RES="$(gapi PATCH "https://identitytoolkit.googleapis.com/admin/v2/projects/$PROJECT_ID/config?updateMask=signIn.email.enabled,signIn.email.passwordRequired" \
-  '{"signIn":{"email":{"enabled":true,"passwordRequired":true}}}')"
-[[ "$(http_code "$RES")" == "200" ]] && ok "email/password sign-in enabled" \
+  '{"signIn":{"email":{"enabled":true,"passwordRequired":false}}}')"
+[[ "$(http_code "$RES")" == "200" ]] && ok "email/password + email-link (invitation) sign-in enabled" \
   || warn "enable Email/Password manually: https://console.firebase.google.com/project/$PROJECT_ID/authentication/providers ($(http_code "$RES"))"
 warn "Turn on MFA when ready: Authentication → Settings → Multi-factor authentication"
 

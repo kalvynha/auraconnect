@@ -1,7 +1,11 @@
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
+import { isSignInWithEmailLink } from 'firebase/auth';
 import { Navigate, NavLink, Outlet, Route, Routes } from 'react-router-dom';
 import type { Role } from '@shared/types';
 import { useSession } from './lib/session';
+import { auth } from './lib/firebase';
+import { FINISH_SIGN_IN_PATH } from './lib/invites';
+import FinishSignInPage from './pages/FinishSignIn';
 import { INTAKE_ROLES } from './lib/constants';
 import { Badge, Button, ErrorBanner, Loading } from './components/ui';
 import SignInPage from './pages/SignIn';
@@ -98,7 +102,20 @@ const ADMIN: readonly Role[] = ['admin'];
 
 export default function App() {
   const s = useSession();
+  const [emailLink, setEmailLink] = useState(
+    () => window.location.pathname === FINISH_SIGN_IN_PATH && isSignInWithEmailLink(auth, window.location.href),
+  );
 
+  if (emailLink) {
+    return (
+      <FinishSignInPage
+        onDone={() => {
+          setEmailLink(false);
+          void s.reload();
+        }}
+      />
+    );
+  }
   if (s.status === 'loading') return <div className="center-screen"><Loading /></div>;
   if (s.status === 'signedOut') return <SignInPage />;
   if (s.status === 'onboarding') return <OnboardingPage />;
