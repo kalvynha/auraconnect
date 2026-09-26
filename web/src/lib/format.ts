@@ -86,3 +86,24 @@ export function slugify(s: string): string {
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
 }
+
+/** Add `n` days to a `YYYY-MM-DD` date (UTC arithmetic, no DST drift). */
+export function addDaysISO(iso: string, n: number): string {
+  const d = new Date(Date.UTC(+iso.slice(0, 4), +iso.slice(5, 7) - 1, +iso.slice(8, 10)));
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+/** Trimmed string or undefined (for optional callable fields). */
+export function optStr(v: string | null | undefined): string | undefined {
+  const t = (v ?? '').trim();
+  return t ? t : undefined;
+}
+
+export function formatMinutes(min: number | null | undefined): string {
+  if (min === null || min === undefined || Number.isNaN(min)) return '—';
+  if (min < 60) return `${Math.round(min)} min`;
+  const h = Math.floor(min / 60);
+  const m = Math.round(min % 60);
+  return m ? `${h}h ${m}m` : `${h}h`;
+}

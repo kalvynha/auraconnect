@@ -56,3 +56,8 @@ export function currentBenefitPeriodNumber(m: Milestones | null | undefined): nu
   const today = todayISO();
   return m.benefitPeriods.find((bp) => bp.start <= today && today <= bp.end)?.number ?? null;
 }
+
+/** Milestone key used by `milestoneCompletions` / `remindedMilestones`: `{kind}:{dueDate}`. */
+export function milestoneKey(d: Pick<Deadline, 'kind' | 'due'>): string {
+  return `${d.kind}:${d.due}`;
+}

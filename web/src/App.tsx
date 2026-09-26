@@ -6,7 +6,7 @@ import { useSession } from './lib/session';
 import { auth } from './lib/firebase';
 import { FINISH_SIGN_IN_PATH } from './lib/invites';
 import FinishSignInPage from './pages/FinishSignIn';
-import { INTAKE_ROLES } from './lib/constants';
+import { CLINICAL_ROLES, INTAKE_ROLES } from './lib/constants';
 import { Badge, Button, ErrorBanner, Loading } from './components/ui';
 import SignInPage from './pages/SignIn';
 import OnboardingPage from './pages/Onboarding';
@@ -23,6 +23,14 @@ import ReferralReviewPage from './pages/ReferralReview';
 import AlertsPage from './pages/Alerts';
 import AuditLogPage from './pages/AuditLog';
 import MessagesPage from './pages/Messages';
+import VisitsPage from './pages/Visits';
+import TasksPage from './pages/Tasks';
+import BereavementPage from './pages/Bereavement';
+import IdgPage from './pages/Idg';
+import TriagePage from './pages/Triage';
+import HandoffPage from './pages/Handoff';
+import VolunteersPage from './pages/Volunteers';
+import SettingsPage from './pages/Settings';
 
 interface NavItem {
   to: string;
@@ -35,11 +43,19 @@ const NAV: NavItem[] = [
   { to: '/messages', label: 'Messages' },
   { to: '/alerts', label: 'Alerts' },
   { to: '/patients', label: 'Patients' },
+  { to: '/visits', label: 'Visits' },
+  { to: '/tasks', label: 'Tasks' },
+  { to: '/triage', label: 'Triage', roles: CLINICAL_ROLES },
+  { to: '/idg', label: 'IDG meetings' },
+  { to: '/bereavement', label: 'Bereavement' },
+  { to: '/handoff', label: 'Shift handoff' },
+  { to: '/volunteers', label: 'Volunteers' },
   { to: '/referrals', label: 'Referrals', roles: INTAKE_ROLES },
   { to: '/schedule', label: 'On-call schedule' },
   { to: '/members', label: 'Members', roles: ['admin'] },
   { to: '/teams', label: 'Teams', roles: ['admin'] },
   { to: '/policies', label: 'Escalation policies', roles: ['admin'] },
+  { to: '/settings', label: 'Settings', roles: ['admin'] },
   { to: '/audit', label: 'Audit log', roles: ['admin'] },
 ];
 
@@ -148,6 +164,15 @@ export default function App() {
         <Route path="referrals" element={<RequireRole roles={INTAKE_ROLES}><ReferralsPage /></RequireRole>} />
         <Route path="referrals/:referralId" element={<RequireRole roles={INTAKE_ROLES}><ReferralReviewPage /></RequireRole>} />
         <Route path="schedule" element={<SchedulePage />} />
+        <Route path="visits" element={<VisitsPage />} />
+        <Route path="tasks" element={<TasksPage />} />
+        <Route path="triage" element={<RequireRole roles={CLINICAL_ROLES}><TriagePage /></RequireRole>} />
+        <Route path="idg" element={<IdgPage />} />
+        <Route path="idg/:meetingId" element={<IdgPage />} />
+        <Route path="bereavement" element={<BereavementPage />} />
+        <Route path="handoff" element={<HandoffPage />} />
+        <Route path="volunteers" element={<VolunteersPage />} />
+        <Route path="settings" element={<RequireRole roles={ADMIN}><SettingsPage /></RequireRole>} />
         <Route path="members" element={<RequireRole roles={ADMIN}><MembersPage /></RequireRole>} />
         <Route path="teams" element={<RequireRole roles={ADMIN}><TeamsPage /></RequireRole>} />
         <Route path="policies" element={<RequireRole roles={ADMIN}><PoliciesPage /></RequireRole>} />

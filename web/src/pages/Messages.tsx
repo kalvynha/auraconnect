@@ -12,7 +12,9 @@ import {
 } from 'firebase/firestore';
 import { getDownloadURL, ref as storageRef } from 'firebase/storage';
 import type {
+  AiTextResult,
   Attachment,
+  BroadcastTarget,
   Channel,
   CreateChannelRequest,
   CreateChannelResponse,
@@ -20,16 +22,24 @@ import type {
   OnCallRole,
   Priority,
   ReadReceipt,
+  RecallMessageRequest,
+  SearchMessagesRequest,
+  SearchMessagesResponse,
+  SendBroadcastRequest,
+  SendBroadcastResponse,
   SendRoleMessageRequest,
   SendRoleMessageResponse,
+  SummarizeChannelRequest,
+  Discipline,
+  Team,
 } from '@shared/types';
 import { useOrgSession, type OrgSession } from '../lib/session';
 import { orgCol, orgDoc, type WithId } from '../lib/firestore';
-import { useLiveDoc, useLiveQuery } from '../lib/hooks';
+import { useAction, useLiveDoc, useLiveQuery } from '../lib/hooks';
 import { call, storage } from '../lib/firebase';
-import { PRIORITIES } from '../lib/constants';
+import { DISCIPLINES, PRIORITIES } from '../lib/constants';
 import { errorMessage, formatInstant, formatTime, tsMillis, tsToDate } from '../lib/format';
-import { Badge, Button, ErrorBanner, Field, MemberPicker, MemberSelect, Modal } from '../components/ui';
+import { AiResultView, Badge, Button, ErrorBanner, Field, MemberPicker, MemberSelect, Modal } from '../components/ui';
 
 const MAX_BODY = 8000;
 
@@ -54,6 +64,8 @@ function ChannelRow({ c, active, onClick }: { c: WithId<Channel>; active: boolea
         <span className="channel-name">
           {c.type === 'patient' && <span className="tag">PT</span>}
           {c.type === 'team' && <span className="tag">TEAM</span>}
+          {c.type === 'broadcast' && <span className="tag">BCAST</span>}
+          {c.archived && <span className="tag">ARCHIVED</span>}
           {channelTitle(c, s)}
         </span>
         <span className="muted small">{c.lastMessage ? formatTime(c.lastMessageAt) : ''}</span>
@@ -87,31 +99,25 @@ function AttachmentLink({ a }: { a: Attachment }) {
   );
 }
 
-function ChatView({ channel }: { channel: WithId<Channel> }) {
+/** Whether the current user may post in this channel (rules: not viewer, not archived, broadcast = creator only). */
+function canPost(channel: Channel, s: OrgSession): boolean {
+  if (s.role === 'viewer' || channel.archived) return false;
+  if (channel.type === 'broadcast' && channel.createdBy !== s.user.uid) return false;
+  return true;
+}
+
+function readOnlyReason(channel: Channel, s: OrgSession): string {
+  if (channel.archived) return 'This conversation is archived and read-only.';
+  if (s.role === 'viewer') return 'Viewers cannot send messages.';
+  return 'This is a broadcast. Only the sender can post.';
+}
+
+function Composer({ channel, threadParentId, placeholder }: { channel: WithId<Channel>; threadParentId?: string; placeholder?: string }) {
   const s = useOrgSession();
-  const messages = useLiveQuery<Message>(
-    query(orgCol(s.orgId, 'channels', channel.id, 'messages'), orderBy('createdAt'), limitToLast(200)),
-    [s.orgId, channel.id],
-  );
   const [body, setBody] = useState('');
   const [priority, setPriority] = useState<Priority>('normal');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const endRef = useRef<HTMLDivElement>(null);
-  const canSend = s.role !== 'viewer' && !channel.archived;
-
-  // Mark read whenever this channel is open and new messages arrive.
-  const lastId = messages.data[messages.data.length - 1]?.id;
-  useEffect(() => {
-    if (messages.loading) return;
-    setDoc(orgDoc(s.orgId, 'channels', channel.id, 'reads', s.user.uid), { lastReadAt: serverTimestamp() }).catch(() => {
-      /* non-fatal */
-    });
-  }, [s.orgId, channel.id, s.user.uid, lastId, messages.loading]);
-
-  useEffect(() => {
-    endRef.current?.scrollIntoView({ block: 'end' });
-  }, [lastId]);
 
   async function send(e?: FormEvent) {
     e?.preventDefault();
@@ -121,7 +127,8 @@ function ChatView({ channel }: { channel: WithId<Channel> }) {
     setSending(true);
     setError(null);
     try {
-      await addDoc(orgCol(s.orgId, 'channels', channel.id, 'messages'), {
+      // Exact client create shape; `threadParentId` only on thread replies (non-empty string).
+      const data: Record<string, unknown> = {
         senderUid: s.user.uid,
         senderName: (s.member?.displayName || s.user.displayName || s.user.email || 'Unknown').slice(0, 200),
         body: text,
@@ -130,7 +137,9 @@ function ChatView({ channel }: { channel: WithId<Channel> }) {
         roleTarget: null,
         createdAt: serverTimestamp(),
         alertId: null,
-      });
+      };
+      if (threadParentId) data.threadParentId = threadParentId;
+      await addDoc(orgCol(s.orgId, 'channels', channel.id, 'messages'), data);
       setBody('');
       setPriority('normal');
     } catch (err) {
@@ -147,77 +156,372 @@ function ChatView({ channel }: { channel: WithId<Channel> }) {
     }
   }
 
-  let lastDay = '';
+  if (!canPost(channel, s)) return <div className="composer muted small">{readOnlyReason(channel, s)}</div>;
   return (
-    <div className="chat">
-      <header className="chat-header">
-        <div>
-          <h2>{channelTitle(channel, s)}</h2>
-          <div className="muted small">
-            {channel.type} · {channel.memberUids.map((u) => s.memberName(u)).join(', ')}
-          </div>
-        </div>
-        {channel.patientId && (
-          <Link to={`/patients/${channel.patientId}`}>Patient chart →</Link>
-        )}
-      </header>
-      <div className="chat-messages">
-        <ErrorBanner error={messages.error} />
-        {messages.loading && <p className="muted">Loading…</p>}
-        {!messages.loading && messages.data.length === 0 && <p className="muted center-text">No messages yet.</p>}
-        {messages.data.map((m) => {
-          const d = tsToDate(m.createdAt);
-          const day = d ? d.toDateString() : '';
-          const showDay = day !== lastDay;
-          lastDay = day;
-          const mine = m.senderUid === s.user.uid;
-          return (
-            <div key={m.id}>
-              {showDay && d && <div className="day-sep">{d.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' })}</div>}
-              <div className={`msg ${mine ? 'mine' : ''} prio-${m.priority}`}>
-                <div className="msg-meta">
-                  <strong>{mine ? 'You' : m.senderName}</strong>
-                  <span className="muted small" title={formatInstant(m.createdAt)}>{formatTime(m.createdAt)}</span>
-                  {m.priority !== 'normal' && <Badge value={m.priority} />}
-                  {m.roleTarget && <span className="tag">to {m.roleTarget}</span>}
-                  {m.alertId && <span className="tag">alert raised</span>}
-                </div>
-                <div className="msg-body">{m.body}</div>
-                {m.attachments?.length > 0 && (
-                  <div className="row gap-sm wrap">
-                    {m.attachments.map((a, i) => <AttachmentLink key={i} a={a} />)}
-                  </div>
-                )}
-              </div>
-            </div>
-          );
-        })}
-        <div ref={endRef} />
+    <form className="composer" onSubmit={send}>
+      <ErrorBanner error={error} />
+      <textarea
+        rows={2}
+        placeholder={placeholder ?? 'Message… (Enter to send, Shift+Enter for newline)'}
+        value={body}
+        maxLength={MAX_BODY}
+        onChange={(e) => setBody(e.target.value)}
+        onKeyDown={onKey}
+      />
+      <div className="row gap-sm">
+        <select value={priority} onChange={(e) => setPriority(e.target.value as Priority)} aria-label="Priority">
+          {PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
+        </select>
+        <Button type="submit" variant={priority === 'normal' ? 'primary' : 'danger'} busy={sending} disabled={!body.trim()}>
+          {threadParentId ? 'Reply' : 'Send'}{priority !== 'normal' ? ` ${priority}` : ''}
+        </Button>
       </div>
-      {canSend ? (
-        <form className="composer" onSubmit={send}>
-          <ErrorBanner error={error} />
-          <textarea
-            rows={2}
-            placeholder="Message… (Enter to send, Shift+Enter for newline)"
-            value={body}
-            maxLength={MAX_BODY}
-            onChange={(e) => setBody(e.target.value)}
-            onKeyDown={onKey}
-          />
-          <div className="row gap-sm">
-            <select value={priority} onChange={(e) => setPriority(e.target.value as Priority)} aria-label="Priority">
-              {PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
-            </select>
-            <Button type="submit" variant={priority === 'normal' ? 'primary' : 'danger'} busy={sending} disabled={!body.trim()}>
-              Send{priority !== 'normal' ? ` ${priority}` : ''}
-            </Button>
-          </div>
-        </form>
+    </form>
+  );
+}
+
+function MessageBubble({
+  m,
+  channel,
+  onThread,
+  inThread,
+}: {
+  m: WithId<Message>;
+  channel: WithId<Channel>;
+  onThread?: () => void;
+  inThread?: boolean;
+}) {
+  const s = useOrgSession();
+  const recall = useAction();
+  const mine = m.senderUid === s.user.uid;
+  const recalled = !!m.recalledAt;
+  const canRecall = !recalled && s.role !== 'viewer' && (mine || s.isAdmin);
+  const replies = m.replyCount ?? 0;
+
+  async function doRecall() {
+    if (!window.confirm('Recall this message? Its text and attachments are removed for everyone.')) return;
+    await recall.run(() =>
+      call<RecallMessageRequest, unknown>('recallMessage', { orgId: s.orgId, channelId: channel.id, messageId: m.id }),
+    );
+  }
+
+  return (
+    <div className={`msg ${mine ? 'mine' : ''} prio-${m.priority} ${recalled ? 'recalled' : ''}`} id={`msg-${m.id}`}>
+      <div className="msg-meta">
+        <strong>{mine ? 'You' : m.senderName}</strong>
+        <span className="muted small" title={formatInstant(m.createdAt)}>{inThread ? formatInstant(m.createdAt) : formatTime(m.createdAt)}</span>
+        {m.priority !== 'normal' && <Badge value={m.priority} />}
+        {m.roleTarget && <span className="tag">to {m.roleTarget}</span>}
+        {m.alertId && <span className="tag">alert raised</span>}
+      </div>
+      {recalled ? (
+        <div className="msg-body muted"><em>Message recalled</em></div>
       ) : (
-        <div className="composer muted small">{channel.archived ? 'This conversation is archived.' : 'Viewers cannot send messages.'}</div>
+        <>
+          <div className="msg-body">{m.body}</div>
+          {m.attachments?.length > 0 && (
+            <div className="row gap-sm wrap">
+              {m.attachments.map((a, i) => <AttachmentLink key={i} a={a} />)}
+            </div>
+          )}
+        </>
+      )}
+      <ErrorBanner error={recall.error} />
+      {(onThread || canRecall) && (
+        <div className="msg-actions">
+          {onThread && replies > 0 && (
+            <button type="button" className="link small" onClick={onThread}>
+              {replies} {replies === 1 ? 'reply' : 'replies'}{m.lastReplyAt ? ` · last ${formatTime(m.lastReplyAt)}` : ''}
+            </button>
+          )}
+          {onThread && !recalled && (replies === 0) && (
+            <button type="button" className="link small" onClick={onThread}>Reply in thread</button>
+          )}
+          {canRecall && (
+            <button type="button" className="link small danger-link" disabled={recall.busy} onClick={() => void doRecall()}>
+              Recall
+            </button>
+          )}
+        </div>
       )}
     </div>
+  );
+}
+
+function ThreadPanel({ channel, parent, onClose }: { channel: WithId<Channel>; parent: WithId<Message>; onClose: () => void }) {
+  const s = useOrgSession();
+  const replies = useLiveQuery<Message>(
+    query(orgCol(s.orgId, 'channels', channel.id, 'messages'), where('threadParentId', '==', parent.id)),
+    [s.orgId, channel.id, parent.id],
+  );
+  const sorted = useMemo(() => [...replies.data].sort((a, b) => tsMillis(a.createdAt) - tsMillis(b.createdAt)), [replies.data]);
+  const endRef = useRef<HTMLDivElement>(null);
+  const lastId = sorted[sorted.length - 1]?.id;
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ block: 'end' });
+  }, [lastId]);
+
+  return (
+    <aside className="thread-panel">
+      <header className="chat-header">
+        <h2>Thread</h2>
+        <button className="icon-btn" onClick={onClose} aria-label="Close thread">×</button>
+      </header>
+      <div className="chat-messages">
+        <MessageBubble m={parent} channel={channel} inThread />
+        <div className="day-sep">{sorted.length} {sorted.length === 1 ? 'reply' : 'replies'}</div>
+        <ErrorBanner error={replies.error} />
+        {sorted.map((m) => <MessageBubble key={m.id} m={m} channel={channel} inThread />)}
+        <div ref={endRef} />
+      </div>
+      <Composer channel={channel} threadParentId={parent.id} placeholder="Reply in thread…" />
+    </aside>
+  );
+}
+
+function SummarizeModal({ channel, onClose }: { channel: WithId<Channel>; onClose: () => void }) {
+  const s = useOrgSession();
+  const act = useAction();
+  const [sinceHours, setSinceHours] = useState(24);
+  const [result, setResult] = useState<AiTextResult | null>(null);
+  async function run() {
+    setResult(null);
+    let res: AiTextResult | null = null;
+    const ok = await act.run(async () => {
+      res = await call<SummarizeChannelRequest, AiTextResult>('summarizeChannel', { orgId: s.orgId, channelId: channel.id, sinceHours });
+    });
+    if (ok) setResult(res);
+  }
+  return (
+    <Modal title="Summarize conversation" onClose={onClose} wide>
+      <ErrorBanner error={act.error} />
+      <div className="row gap">
+        <select value={sinceHours} onChange={(e) => setSinceHours(Number(e.target.value))} aria-label="Time range">
+          {[12, 24, 72, 168].map((h) => <option key={h} value={h}>Last {h < 48 ? `${h} hours` : `${h / 24} days`}</option>)}
+        </select>
+        <Button variant="primary" busy={act.busy} onClick={() => void run()}>{result ? 'Regenerate' : 'Summarize'}</Button>
+      </div>
+      {act.busy && <p className="muted">Summarizing…</p>}
+      {result && <AiResultView result={result} />}
+    </Modal>
+  );
+}
+
+function ChatView({ channel }: { channel: WithId<Channel> }) {
+  const s = useOrgSession();
+  const messages = useLiveQuery<Message>(
+    query(orgCol(s.orgId, 'channels', channel.id, 'messages'), orderBy('createdAt'), limitToLast(200)),
+    [s.orgId, channel.id],
+  );
+  const [threadId, setThreadId] = useState<string | null>(null);
+  const [summarizing, setSummarizing] = useState(false);
+  const endRef = useRef<HTMLDivElement>(null);
+  // Channel timeline hides thread replies (old messages lack threadParentId).
+  const timeline = useMemo(() => messages.data.filter((m) => !m.threadParentId), [messages.data]);
+  const threadParent = threadId ? messages.data.find((m) => m.id === threadId) ?? null : null;
+
+  // Mark read whenever this channel is open and new messages arrive.
+  const lastId = messages.data[messages.data.length - 1]?.id;
+  const lastTimelineId = timeline[timeline.length - 1]?.id;
+  useEffect(() => {
+    if (messages.loading) return;
+    setDoc(orgDoc(s.orgId, 'channels', channel.id, 'reads', s.user.uid), { lastReadAt: serverTimestamp() }).catch(() => {
+      /* non-fatal */
+    });
+  }, [s.orgId, channel.id, s.user.uid, lastId, messages.loading]);
+
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ block: 'end' });
+  }, [lastTimelineId]);
+
+  let lastDay = '';
+  return (
+    <div className="chat-with-thread">
+      <div className="chat">
+        <header className="chat-header">
+          <div>
+            <h2>
+              {channelTitle(channel, s)} {channel.archived && <Badge tone="neutral">archived</Badge>}
+              {channel.type === 'broadcast' && <> <Badge tone="info">broadcast</Badge></>}
+            </h2>
+            <div className="muted small">
+              {channel.type} · {channel.memberUids.map((u) => s.memberName(u)).join(', ')}
+            </div>
+          </div>
+          <div className="row gap">
+            <Button small onClick={() => setSummarizing(true)}>Summarize</Button>
+            {channel.patientId && <Link to={`/patients/${channel.patientId}`}>Patient chart →</Link>}
+          </div>
+        </header>
+        <div className="chat-messages">
+          <ErrorBanner error={messages.error} />
+          {messages.loading && <p className="muted">Loading…</p>}
+          {!messages.loading && timeline.length === 0 && <p className="muted center-text">No messages yet.</p>}
+          {timeline.map((m) => {
+            const d = tsToDate(m.createdAt);
+            const day = d ? d.toDateString() : '';
+            const showDay = day !== lastDay;
+            lastDay = day;
+            return (
+              <div key={m.id}>
+                {showDay && d && <div className="day-sep">{d.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' })}</div>}
+                <MessageBubble m={m} channel={channel} onThread={() => setThreadId(m.id)} />
+              </div>
+            );
+          })}
+          <div ref={endRef} />
+        </div>
+        <Composer channel={channel} />
+      </div>
+      {threadParent && <ThreadPanel key={threadParent.id} channel={channel} parent={threadParent} onClose={() => setThreadId(null)} />}
+      {summarizing && <SummarizeModal channel={channel} onClose={() => setSummarizing(false)} />}
+    </div>
+  );
+}
+
+function SearchModal({ onClose, onOpen }: { onClose: () => void; onOpen: (channelId: string) => void }) {
+  const s = useOrgSession();
+  const act = useAction();
+  const [q, setQ] = useState('');
+  const [res, setRes] = useState<SearchMessagesResponse | null>(null);
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    const text = q.trim();
+    if (text.length < 2) return act.setError('Enter at least 2 characters.');
+    let out: SearchMessagesResponse | null = null;
+    const ok = await act.run(async () => {
+      out = await call<SearchMessagesRequest, SearchMessagesResponse>('searchMessages', { orgId: s.orgId, query: text });
+    });
+    if (ok) setRes(out);
+  }
+  return (
+    <Modal title="Search messages" onClose={onClose} wide>
+      <form className="row gap" onSubmit={submit}>
+        <input type="search" className="search" autoFocus placeholder="Search your conversations…" value={q} onChange={(e) => setQ(e.target.value)} />
+        <Button type="submit" variant="primary" busy={act.busy}>Search</Button>
+      </form>
+      <p className="muted small">
+        Simple case-insensitive text match over your active conversations from the last 90 days (not full-text search).
+      </p>
+      <ErrorBanner error={act.error} />
+      {res && (
+        <>
+          {res.hits.length === 0 && <p className="muted">No matches.</p>}
+          <ul className="list">
+            {res.hits.map((h) => (
+              <li key={`${h.channelId}/${h.messageId}`} className="list-row search-hit">
+                <button type="button" className="link" onClick={() => onOpen(h.channelId)}>
+                  <strong>{h.channelName ?? 'Direct message'}</strong>
+                </button>
+                <div className="search-snippet">
+                  <span className="muted small">{h.senderName} · {formatInstant(h.createdAt)}</span>
+                  <div>{h.snippet}</div>
+                </div>
+              </li>
+            ))}
+          </ul>
+          {res.truncated && <p className="muted small">Showing the first {res.hits.length} matches. Refine your search to see more.</p>}
+        </>
+      )}
+    </Modal>
+  );
+}
+
+function BroadcastModal({ onClose, onOpen }: { onClose: () => void; onOpen: (channelId: string) => void }) {
+  const s = useOrgSession();
+  const act = useAction();
+  const teams = useLiveQuery<Team>(query(orgCol(s.orgId, 'teams'), orderBy('name')), [s.orgId]);
+  const roles = useLiveQuery<OnCallRole>(query(orgCol(s.orgId, 'onCallRoles'), orderBy('label')), [s.orgId]);
+  const [name, setName] = useState('');
+  const [kind, setKind] = useState<BroadcastTarget['kind']>('all');
+  const [teamId, setTeamId] = useState('');
+  const [roleKey, setRoleKey] = useState('');
+  const [discipline, setDiscipline] = useState<Discipline>('RN');
+  const [body, setBody] = useState('');
+  const [priority, setPriority] = useState<Priority>('normal');
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    let target: BroadcastTarget;
+    if (kind === 'team') {
+      if (!teamId) return act.setError('Choose a team.');
+      target = { kind, teamId };
+    } else if (kind === 'role') {
+      if (!roleKey) return act.setError('Choose a role.');
+      target = { kind, roleKey };
+    } else if (kind === 'discipline') {
+      target = { kind, discipline };
+    } else {
+      target = { kind: 'all' };
+    }
+    if (!body.trim()) return act.setError('Write a message.');
+    let res: SendBroadcastResponse | null = null;
+    const ok = await act.run(async () => {
+      res = await call<SendBroadcastRequest, SendBroadcastResponse>('sendBroadcast', {
+        orgId: s.orgId,
+        name: name.trim() || 'Broadcast',
+        target,
+        body: body.trim(),
+        priority,
+      });
+    });
+    const r = res as SendBroadcastResponse | null;
+    if (ok && r) onOpen(r.channelId);
+  }
+
+  return (
+    <Modal title="New broadcast" onClose={onClose}>
+      <form className="form" onSubmit={submit}>
+        <ErrorBanner error={act.error ?? teams.error ?? roles.error} />
+        <Field label="Title">
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Weather advisory" required />
+        </Field>
+        <Field label="Recipients">
+          <select value={kind} onChange={(e) => setKind(e.target.value as BroadcastTarget['kind'])}>
+            <option value="all">Everyone in the organization</option>
+            <option value="team">A team</option>
+            <option value="role">Whoever is on call for a role</option>
+            <option value="discipline">A discipline</option>
+          </select>
+        </Field>
+        {kind === 'team' && (
+          <Field label="Team">
+            <select value={teamId} onChange={(e) => setTeamId(e.target.value)} required>
+              <option value="">Select team…</option>
+              {teams.data.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+          </Field>
+        )}
+        {kind === 'role' && (
+          <Field label="On-call role">
+            <select value={roleKey} onChange={(e) => setRoleKey(e.target.value)} required>
+              <option value="">Select role…</option>
+              {roles.data.map((r) => <option key={r.id} value={r.id}>{r.label}</option>)}
+            </select>
+          </Field>
+        )}
+        {kind === 'discipline' && (
+          <Field label="Discipline">
+            <select value={discipline} onChange={(e) => setDiscipline(e.target.value as Discipline)}>
+              {DISCIPLINES.map((d) => <option key={d} value={d}>{d}</option>)}
+            </select>
+          </Field>
+        )}
+        <Field label="Message">
+          <textarea rows={4} maxLength={MAX_BODY} value={body} onChange={(e) => setBody(e.target.value)} required />
+        </Field>
+        <Field label="Priority">
+          <select value={priority} onChange={(e) => setPriority(e.target.value as Priority)}>
+            {PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
+          </select>
+        </Field>
+        <p className="muted small">Recipients can read the broadcast but cannot reply in it.</p>
+        <div className="row gap end">
+          <Button onClick={onClose}>Cancel</Button>
+          <Button type="submit" variant="primary" busy={act.busy}>Send broadcast</Button>
+        </div>
+      </form>
+    </Modal>
   );
 }
 
@@ -319,6 +623,9 @@ export default function MessagesPage() {
   const s = useOrgSession();
   const navigate = useNavigate();
   const [creating, setCreating] = useState(false);
+  const [searching, setSearching] = useState(false);
+  const [broadcasting, setBroadcasting] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
   const [filter, setFilter] = useState('');
   const channels = useLiveQuery<Channel>(
     query(
@@ -331,9 +638,9 @@ export default function MessagesPage() {
   );
   const visible = useMemo(() => {
     const q = filter.trim().toLowerCase();
-    return channels.data.filter((c) => !c.archived && (!q || channelTitle(c, s).toLowerCase().includes(q)));
+    return channels.data.filter((c) => (showArchived || !c.archived) && (!q || channelTitle(c, s).toLowerCase().includes(q)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [channels.data, filter, s.members]);
+  }, [channels.data, filter, s.members, showArchived]);
   const active = channels.data.find((c) => c.id === channelId) ?? null;
 
   return (
@@ -344,6 +651,13 @@ export default function MessagesPage() {
           {s.role !== 'viewer' && (
             <Button small variant="primary" onClick={() => setCreating(true)}>New</Button>
           )}
+        </div>
+        <div className="channel-list-tools">
+          <Button small variant="ghost" onClick={() => setSearching(true)}>Search messages</Button>
+          {s.role !== 'viewer' && <Button small variant="ghost" onClick={() => setBroadcasting(true)}>New broadcast</Button>}
+          <label className="row gap-sm small">
+            <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} /> Archived
+          </label>
         </div>
         <ErrorBanner error={channels.error} />
         {channels.loading && <p className="muted pad">Loading…</p>}
@@ -361,6 +675,24 @@ export default function MessagesPage() {
           <div className="empty-chat muted">Select a conversation.</div>
         )}
       </section>
+      {searching && (
+        <SearchModal
+          onClose={() => setSearching(false)}
+          onOpen={(id) => {
+            setSearching(false);
+            navigate(`/messages/${id}`);
+          }}
+        />
+      )}
+      {broadcasting && (
+        <BroadcastModal
+          onClose={() => setBroadcasting(false)}
+          onOpen={(id) => {
+            setBroadcasting(false);
+            navigate(`/messages/${id}`);
+          }}
+        />
+      )}
       {creating && (
         <NewConversationModal
           onClose={() => setCreating(false)}

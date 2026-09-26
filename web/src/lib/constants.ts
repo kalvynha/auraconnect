@@ -1,6 +1,17 @@
 // Runtime mirrors of the constants in @shared/types (which we may only import as types).
 import type {
   AlertStatus,
+  BereavementContactStatus,
+  DischargeReason,
+  DocumentCategory,
+  Org,
+  TaskStatus,
+  TaskTemplateEvent,
+  TaskTemplateItem,
+  TriageDisposition,
+  TriageUrgency,
+  VisitStatus,
+  VolunteerActivity,
   CodeStatus,
   Discipline,
   LevelOfCare,
@@ -44,3 +55,103 @@ export const TIMEZONES: readonly string[] = [
 
 /** Roles allowed to work with referrals and admissions. */
 export const INTAKE_ROLES: readonly Role[] = ['admin', 'clinician', 'intake'];
+
+// ---------------------------------------------------------------------------
+// v2
+// ---------------------------------------------------------------------------
+
+/** Mirror of ORG_SETTING_DEFAULTS in @shared/types. */
+export const ORG_SETTING_DEFAULTS = {
+  triageRoleKey: null as string | null,
+  idgCadenceDays: 15,
+  missedVisitGraceMinutes: 120,
+  messageLifespanDays: null as number | null,
+};
+
+export type OrgSettings = typeof ORG_SETTING_DEFAULTS;
+
+/** Org settings with v2 defaults applied (older org docs lack these fields). */
+export function orgSettings(org: Partial<Org> | null | undefined): OrgSettings {
+  return {
+    triageRoleKey: org?.triageRoleKey ?? ORG_SETTING_DEFAULTS.triageRoleKey,
+    idgCadenceDays: org?.idgCadenceDays ?? ORG_SETTING_DEFAULTS.idgCadenceDays,
+    missedVisitGraceMinutes: org?.missedVisitGraceMinutes ?? ORG_SETTING_DEFAULTS.missedVisitGraceMinutes,
+    messageLifespanDays: org?.messageLifespanDays ?? ORG_SETTING_DEFAULTS.messageLifespanDays,
+  };
+}
+
+/** "Clinical" roles in the v2 contract: may run lifecycle, visit, IDG and triage mutations. */
+export const CLINICAL_ROLES: readonly Role[] = ['admin', 'clinician', 'intake'];
+
+export const DISCHARGE_REASON_LABELS: Record<DischargeReason, string> = {
+  revocation: 'Revocation',
+  transfer: 'Transfer to another hospice',
+  no_longer_terminally_ill: 'No longer terminally ill',
+  moved_out_of_area: 'Moved out of service area',
+  for_cause: 'Discharge for cause',
+  other: 'Other',
+};
+
+export const VISIT_STATUSES: readonly VisitStatus[] = ['scheduled', 'completed', 'missed', 'cancelled'];
+export const TASK_STATUSES: readonly TaskStatus[] = ['open', 'done', 'cancelled'];
+export const TASK_TEMPLATE_EVENTS: readonly TaskTemplateEvent[] = ['admission', 'recertification', 'discharge', 'death'];
+
+const tpl = (title: string, discipline: Discipline, offsetDays: number): TaskTemplateItem => ({
+  title,
+  description: null,
+  discipline,
+  offsetDays,
+  priority: 'normal',
+});
+
+/** Defaults the backend applies when an org has no templates (DATA_MODEL v2). */
+export const DEFAULT_TASK_TEMPLATES: Record<TaskTemplateEvent, TaskTemplateItem[]> = {
+  admission: [
+    tpl('Comprehensive assessment', 'RN', 5),
+    tpl('Medication reconciliation', 'RN', 1),
+    tpl('DME needs review', 'RN', 2),
+    tpl('Social work assessment', 'SW', 5),
+    tpl('Spiritual assessment', 'Chaplain', 5),
+    tpl('Initial plan of care', 'MD', 5),
+  ],
+  recertification: [tpl('Update plan of care', 'RN', 0), tpl('Physician narrative', 'MD', 0)],
+  discharge: [
+    tpl('Discharge summary', 'RN', 2),
+    tpl('Notify attending physician', 'RN', 1),
+    tpl('Coordinate DME pickup', 'SW', 3),
+  ],
+  death: [
+    tpl('Notify attending physician', 'RN', 0),
+    tpl('Coordinate DME pickup', 'SW', 2),
+    tpl('Medication disposal documentation', 'RN', 1),
+    tpl('Bereavement assessment', 'SW', 7),
+    tpl('Death summary', 'RN', 2),
+  ],
+};
+
+export const BEREAVEMENT_RISKS = ['low', 'moderate', 'high'] as const;
+export type BereavementRisk = (typeof BEREAVEMENT_RISKS)[number];
+export const BEREAVEMENT_CONTACT_STATUSES: readonly BereavementContactStatus[] = ['pending', 'done', 'skipped'];
+
+export const TRIAGE_URGENCIES: readonly TriageUrgency[] = ['routine', 'urgent', 'emergent'];
+export const TRIAGE_DISPOSITION_LABELS: Record<TriageDisposition, string> = {
+  advice_given: 'Advice given',
+  visit_scheduled: 'Visit scheduled',
+  visit_made: 'Visit made',
+  md_contacted: 'MD contacted',
+  ems_911: 'EMS / 911',
+  other: 'Other',
+};
+
+export const DOCUMENT_CATEGORY_LABELS: Record<DocumentCategory, string> = {
+  consent: 'Consent',
+  polst: 'POLST / DNR',
+  order: 'Order',
+  referral: 'Referral',
+  plan_of_care: 'Plan of care',
+  other: 'Other',
+};
+
+export const VOLUNTEER_ACTIVITIES: readonly VolunteerActivity[] = [
+  'companionship', 'respite', 'vigil', 'errands', 'bereavement', 'admin', 'other',
+];
