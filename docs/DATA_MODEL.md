@@ -863,3 +863,11 @@ The types are in the "v4" section of `functions/src/shared/types.ts`. The client
   - It doesn't re-push.
 - **Web push.** The web app registers an FCM token (VAPID key from `VITE_FIREBASE_VAPID_KEY`) into `members/{uid}.fcmTokens`, using the same self-update path as iOS. The payloads are the existing generic ones.
 - **iOS lock-screen actions.** The categories are `AURA_ALERT` (Acknowledge, which requires authentication) and `AURA_MESSAGE` (Reply, a text input that requires authentication, and Mark read). The backend sets `apns.payload.aps.category` in `notify.ts`.
+
+### v4 implementation notes (behavior decided during the build)
+- **System notes** (out-of-office auto-reply, "not in this conversation" mention notes) use ids prefixed `sysnote_`. They never push or mark channels unread. The out-of-office reply is posted at most once per day per absence.
+- **Role routing** skips off and out-of-office members for messaging and triage. Alert escalation still pages them if nobody else is available, so an alert always reaches someone.
+- **Pins:** at most 10. An 11th is refused until one is unpinned.
+- **`nudgeUnread`** reaches every unread member, including those who muted the channel. It is limited to 1 per message per 10 minutes.
+- **`offShiftQuiet`** applies to members with a shift ending in the future or within the last 14 days.
+- **Load impact** (2,000 messages): message push notifications drop by about 35% with typical preferences (19.2k → 12.5k). Reads per message rise from about 7 to about 15, bounded by roughly 2 × recipients + 3.
