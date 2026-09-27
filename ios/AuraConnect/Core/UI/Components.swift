@@ -65,6 +65,7 @@ extension ReferralStatus {
         case .accepted: return .green
         case .rejected: return .secondary
         case .failed: return .red
+        case .nonAdmit: return .secondary
         }
     }
 }
@@ -76,6 +77,7 @@ extension PatientStatus {
         case .admitted: return .green
         case .discharged: return .secondary
         case .deceased: return .purple
+        case .nonAdmit: return .secondary
         }
     }
 }
@@ -173,7 +175,6 @@ struct InfoRow: View {
                 } else {
                     Text(value)
                         .multilineTextAlignment(.trailing)
-                        .textSelection(.enabled)
                 }
             }
         }

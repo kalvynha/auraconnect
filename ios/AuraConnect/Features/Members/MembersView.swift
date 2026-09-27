@@ -71,6 +71,8 @@ private struct MembersContent: View {
     @Environment(OrgStore.self) private var org
     @State private var model: MembersViewModel
     @State private var showInvite = false
+    /// v3: tap a member to change role, capabilities, active status, or offboard them.
+    @State private var editingMember: Member?
 
     init(orgId: String) {
         _model = State(initialValue: MembersViewModel(orgId: orgId))
@@ -111,7 +113,12 @@ private struct MembersContent: View {
                         .foregroundStyle(.secondary)
                 }
                 ForEach(members) { member in
-                    MemberRow(member: member)
+                    Button {
+                        editingMember = member
+                    } label: {
+                        MemberRow(member: member)
+                    }
+                    .buttonStyle(.plain)
                 }
             } header: {
                 Text("Members (\(members.count))")
@@ -130,6 +137,10 @@ private struct MembersContent: View {
         }
         .sheet(isPresented: $showInvite) {
             InviteMemberView()
+                .environment(org)
+        }
+        .sheet(item: $editingMember) { member in
+            MemberAdminView(member: member)
                 .environment(org)
         }
         .task { await model.runInvites() }

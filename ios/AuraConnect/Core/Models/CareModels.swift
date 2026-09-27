@@ -120,7 +120,7 @@ enum TaskTemplateEvent: String, Codable, CaseIterable, Identifiable, Hashable {
 }
 
 enum BereavementContactType: String, Codable, CaseIterable, Identifiable, Hashable {
-    case call, letter, visit, mailing
+    case call, letter, visit, mailing, assessment
 
     var id: String { rawValue }
 
@@ -134,6 +134,7 @@ enum BereavementContactType: String, Codable, CaseIterable, Identifiable, Hashab
         case .letter: return "Letter"
         case .visit: return "Visit"
         case .mailing: return "Mailing"
+        case .assessment: return "Risk reassessment"
         }
     }
 }
@@ -256,13 +257,16 @@ struct MilestoneCompletion: Codable, Hashable {
     var completedAt: Date?
     var completedBy: String?
     var note: String?
+    /// v3 (S5): the actual filing date `YYYY-MM-DD`; on time is judged from it.
+    var effectiveDate: String?
 
-    enum CodingKeys: String, CodingKey { case completedAt, completedBy, note }
+    enum CodingKeys: String, CodingKey { case completedAt, completedBy, note, effectiveDate }
 
-    init(completedAt: Date? = nil, completedBy: String? = nil, note: String? = nil) {
+    init(completedAt: Date? = nil, completedBy: String? = nil, note: String? = nil, effectiveDate: String? = nil) {
         self.completedAt = completedAt
         self.completedBy = completedBy
         self.note = note
+        self.effectiveDate = effectiveDate
     }
 
     init(from decoder: Decoder) throws {
@@ -270,6 +274,46 @@ struct MilestoneCompletion: Codable, Hashable {
         completedAt = c.lenient(.completedAt)
         completedBy = c.lenient(.completedBy)
         note = c.lenient(.note)
+        effectiveDate = c.lenient(.effectiveDate)
+    }
+}
+
+/// v3 (S5): a completion that was reopened (`patient.milestoneHistory`, oldest first).
+struct MilestoneHistoryEntry: Codable, Hashable {
+    var key: String?
+    var completedAt: Date?
+    var completedBy: String?
+    var note: String?
+    var effectiveDate: String?
+    var reopenedAt: Date?
+    var reopenedBy: String?
+    var reopenReason: String?
+
+    enum CodingKeys: String, CodingKey {
+        case key, completedAt, completedBy, note, effectiveDate, reopenedAt, reopenedBy, reopenReason
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        key = c.lenient(.key)
+        completedAt = c.lenient(.completedAt)
+        completedBy = c.lenient(.completedBy)
+        note = c.lenient(.note)
+        effectiveDate = c.lenient(.effectiveDate)
+        reopenedAt = c.lenient(.reopenedAt)
+        reopenedBy = c.lenient(.reopenedBy)
+        reopenReason = c.lenient(.reopenReason)
+    }
+
+    /// The milestone kind parsed from `key` (`{kind}:{dueDate}`).
+    var kind: MilestoneKind? {
+        guard let raw = key?.split(separator: ":").first else { return nil }
+        return MilestoneKind(rawValue: String(raw))
+    }
+
+    var dueDate: String? {
+        guard let key, let idx = key.firstIndex(of: ":") else { return nil }
+        return String(key[key.index(after: idx)...])
     }
 }
 
@@ -301,8 +345,15 @@ struct VisitFrequency: Codable, Hashable {
     /// Planned visits per week (may be fractional, e.g. 0.5 = every other week).
     var perWeek: Double
     var notes: String?
+    // v3 (V2) planning hints, preserved when frequencies are re-saved.
+    /// Days of the week, 0 = Sunday … 6 = Saturday.
+    var preferredDays: [Int]?
+    /// Org-local `HH:mm`.
+    var preferredStart: String?
+    var durationMinutes: Int?
+    var assignedUid: String?
 
-    enum CodingKeys: String, CodingKey { case discipline, perWeek, notes }
+    enum CodingKeys: String, CodingKey { case discipline, perWeek, notes, preferredDays, preferredStart, durationMinutes, assignedUid }
 
     init(discipline: Discipline = .rn, perWeek: Double = 1, notes: String? = nil) {
         self.discipline = discipline
@@ -315,6 +366,10 @@ struct VisitFrequency: Codable, Hashable {
         discipline = c.lenient(.discipline) ?? .other
         perWeek = c.lenient(.perWeek) ?? 0
         notes = c.lenient(.notes)
+        preferredDays = c.lenient(.preferredDays)
+        preferredStart = c.lenient(.preferredStart)
+        durationMinutes = c.lenient(.durationMinutes)
+        assignedUid = c.lenient(.assignedUid)
     }
 
     /// "2×/week", "every other week", …
@@ -326,7 +381,12 @@ struct VisitFrequency: Codable, Hashable {
 
     /// Callable payload (`notes` is `null` when blank).
     var dictionary: [String: Any] {
-        ["discipline": discipline.rawValue, "perWeek": perWeek, "notes": blankToNull(notes)]
+        var d: [String: Any] = ["discipline": discipline.rawValue, "perWeek": perWeek, "notes": blankToNull(notes)]
+        if let preferredDays { d["preferredDays"] = preferredDays }
+        if let preferredStart { d["preferredStart"] = preferredStart }
+        if let durationMinutes { d["durationMinutes"] = durationMinutes }
+        if let assignedUid { d["assignedUid"] = assignedUid }
+        return d
     }
 }
 
@@ -367,6 +427,8 @@ struct Visit: Codable, Identifiable {
     var createdBy: String?
     var createdAt: Date?
     var updatedAt: Date?
+    /// v3 (V4): `routine` (default) | `admission` | `evaluation` | `prn` | `aide_supervision`.
+    var type: String?
 
     var visitStatus: VisitStatus { status ?? .scheduled }
     var displayPatientName: String { patientName?.nilIfBlank ?? "Patient" }
@@ -502,6 +564,10 @@ struct BereavementPlan: Codable, Identifiable {
     var closesOn: String?
     var createdAt: Date?
     var updatedAt: Date?
+    /// v3 (C1): family members followed by the plan (see Features/Bereavement/BereavementSurvivors.swift).
+    var survivors: [BereavementSurvivor]?
+    /// v3 (C1): past `closesOn` with contacts still pending.
+    var needsReview: Bool?
 
     var planStatus: BereavementPlanStatus { status ?? .active }
     var risk: BereavementRisk { riskLevel ?? .low }
@@ -586,8 +652,10 @@ extension MilestoneItem {
 }
 
 enum MilestoneCompletionLogic {
-    /// "On time" means the completion's calendar day in the org time zone is on or before the due date.
+    /// "On time" means the filing date (`effectiveDate`, S5) is on or before the due date. Older
+    /// completions without it use the completion's calendar day in the org time zone.
     static func isOnTime(_ completion: MilestoneCompletion, dueDate: String, timeZoneId: String?) -> Bool {
+        if let effective = completion.effectiveDate?.nilIfBlank { return effective <= dueDate }
         guard let completedAt = completion.completedAt else { return true }
         var calendar = Calendar(identifier: .gregorian)
         if let id = timeZoneId?.nilIfBlank, let zone = TimeZone(identifier: id) {

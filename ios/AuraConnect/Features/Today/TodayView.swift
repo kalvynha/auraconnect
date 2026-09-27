@@ -17,6 +17,7 @@ final class TodayViewModel {
     private(set) var workingAlertId: String?
     private(set) var workingTaskId: String?
     var completing: Visit?
+    var rescheduling: Visit?
     var editingTask: CareTask?
     var errorMessage: String?
 
@@ -155,11 +156,8 @@ private struct TodayContent: View {
 
     private var canAct: Bool { org.role.canManageCare }
 
-    private func canComplete(_ visit: Visit) -> Bool {
-        let status = visit.visitStatus
-        guard status == .scheduled || status == .missed else { return false }
-        return canAct || visit.assignedUid == org.uid
-    }
+    /// v3 (V4): my own visits — Aide/LPN viewers may complete them too.
+    private func canComplete(_ visit: Visit) -> Bool { org.canComplete(visit: visit) }
 
     var body: some View {
         @Bindable var model = model
@@ -168,13 +166,20 @@ private struct TodayContent: View {
                 ErrorBanner(message: error)
             }
             alertsSection
-            visitsSection
-            missedSection
-            tasksSection
+            // Volunteers cannot read visits or tasks (firestore.rules); they see alerts only.
+            if !org.isVolunteerMember {
+                visitsSection
+                missedSection
+                tasksSection
+            }
         }
         .navigationTitle("Today")
-        .task(id: dayKey) { await model.runVisits(day: day) }
-        .task { await model.runTasks() }
+        .task(id: "\(dayKey)|\(org.canReadStaffCollections)") { [allowed = org.canReadStaffCollections] in
+            if allowed { await model.runVisits(day: day) }
+        }
+        .task(id: org.canReadStaffCollections) { [allowed = org.canReadStaffCollections] in
+            if allowed { await model.runTasks() }
+        }
         .task(id: alertPatientIds) { await patientNames.load(alertPatientIds) }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { refreshDay() }
@@ -182,6 +187,10 @@ private struct TodayContent: View {
         .onAppear(perform: refreshDay)
         .sheet(item: $model.completing) { visit in
             CompleteVisitView(visit: visit)
+                .environment(org)
+        }
+        .sheet(item: $model.rescheduling) { visit in
+            RescheduleVisitView(visit: visit)
                 .environment(org)
         }
         .sheet(item: $model.editingTask) { task in
@@ -265,7 +274,7 @@ private struct TodayContent: View {
                 Label("Overdue / missed", systemImage: "exclamationmark.circle")
                     .foregroundStyle(.red)
             } footer: {
-                Text("Missed visits from the last 7 days. Swipe right to document a visit late.")
+                Text("Missed visits from the last 7 days. Swipe right to document a visit late, or left to reschedule it.")
             }
         }
     }
@@ -290,6 +299,32 @@ private struct TodayContent: View {
                     Label(visit.visitStatus == .missed ? "Document" : "Complete", systemImage: "checkmark")
                 }
                 .tint(.green)
+            }
+        }
+        .swipeActions(edge: .trailing) {
+            if org.canReschedule(visit: visit) {
+                Button {
+                    model.rescheduling = visit
+                } label: {
+                    Label("Reschedule", systemImage: "calendar.badge.clock")
+                }
+                .tint(.blue)
+            }
+        }
+        .contextMenu {
+            if completable {
+                Button {
+                    model.completing = visit
+                } label: {
+                    Label(visit.visitStatus == .missed ? "Document missed visit" : "Complete visit", systemImage: "checkmark.circle")
+                }
+            }
+            if org.canReschedule(visit: visit) {
+                Button {
+                    model.rescheduling = visit
+                } label: {
+                    Label("Reschedule", systemImage: "calendar.badge.clock")
+                }
             }
         }
     }

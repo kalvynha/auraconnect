@@ -23,7 +23,16 @@ final class OrgOnboardingViewModel {
         isLoadingInvites = true
         defer { isLoadingInvites = false }
         do {
-            invites = try await functions.listMyInvites()
+            // L2: the server lists invites only for a verified email, read from the ID token,
+            // which can lag behind a just-clicked verification link. Refresh it first.
+            if let user = Auth.auth().currentUser {
+                _ = try? await user.getIDTokenResult(forcingRefresh: true)
+            }
+            let result = try await functions.listMyInvitesChecked()
+            invites = result.invites
+            if result.verificationRequired {
+                errorMessage = "Verify your email address to see your invitations."
+            }
         } catch {
             errorMessage = error.userMessage
         }
@@ -148,7 +157,7 @@ struct OrgOnboardingView: View {
             if model.isLoadingInvites && model.invites.isEmpty {
                 ProgressView()
             } else if model.invites.isEmpty {
-                Text("No invitations for this email address. Ask your administrator to invite you, or create a new organization below.")
+                Text("No invitations for this email address. To join your hospice, ask your administrator for an invite (invites expire after 14 days), or create a new organization below.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } else {

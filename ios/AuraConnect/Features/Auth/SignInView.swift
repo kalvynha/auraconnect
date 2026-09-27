@@ -62,6 +62,17 @@ struct SignInView: View {
                     .listRowInsets(EdgeInsets())
                 }
 
+                if mode == .create {
+                    // M5: team members join by invitation (email link); self sign-up is for new organizations.
+                    Section {
+                        Label("Joining your hospice?", systemImage: "envelope.open")
+                            .font(.headline)
+                        Text("Ask your administrator for an invite. Open the link in the invitation email to set up your account, then sign in here. Create an account yourself only if you're setting up AuraConnect for a new organization.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 Section {
                     if mode == .create {
                         TextField("Full name", text: $displayName)

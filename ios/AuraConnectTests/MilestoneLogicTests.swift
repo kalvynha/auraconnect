@@ -53,11 +53,33 @@ final class MilestoneLogicTests: XCTestCase {
 
     func testOverdueAndPastPeriodCutoff() {
         let items = MilestoneLogic.items(for: sampleMilestones(), today: day("2026-07-15"), leadDays: 7, calendar: calendar)
-        // Period 1 ended > 30 days ago and is dropped; period 2 ended 16 days ago and is kept.
-        XCTAssertFalse(items.contains { $0.id == "recert-1:2026-03-31" })
+        // S1: an unfiled recert stays visible (overdue) however old it is.
+        XCTAssertEqual(items.first { $0.id == "recert-1:2026-03-31" }?.status, .overdue)
         XCTAssertTrue(items.contains { $0.id == "recert-2:2026-06-29" })
+        // Once filed, a period that ended > 30 days ago is dropped.
+        let filed = MilestoneLogic.items(for: sampleMilestones(), today: day("2026-07-15"), leadDays: 7,
+                                         completedKeys: ["recert:2026-03-31"], calendar: calendar)
+        XCTAssertFalse(filed.contains { $0.id == "recert-1:2026-03-31" })
+        XCTAssertTrue(filed.contains { $0.id == "recert-2:2026-06-29" })
         XCTAssertEqual(items.first { $0.kind == .noe }?.status, .overdue)
         XCTAssertEqual(items.first { $0.id == "recert-3:2026-08-28" }?.status, .upcoming)
+    }
+
+    func testLeadDaysPerKind() {
+        XCTAssertEqual(MilestoneLogic.leadDays(for: .recert, byKind: nil, fallback: 3), 15)
+        XCTAssertEqual(MilestoneLogic.leadDays(for: .f2f, byKind: nil, fallback: 3), 30)
+        XCTAssertEqual(MilestoneLogic.leadDays(for: .hopeHuv1, byKind: nil, fallback: 3), 2)
+        XCTAssertEqual(MilestoneLogic.leadDays(for: .noe, byKind: ["noe": 5], fallback: 3), 5)
+        // 2026-03-20: recert (03-31) is 11 days out → due soon with the 15-day recert default.
+        let items = MilestoneLogic.items(for: sampleMilestones(), today: day("2026-03-20"), leadDays: 3, calendar: calendar)
+        XCTAssertEqual(items.first { $0.id == "recert-1:2026-03-31" }?.status, .dueSoon)
+    }
+
+    func testCompletionOnTimeUsesEffectiveDate() {
+        let late = MilestoneCompletion(completedAt: day("2026-01-02"), completedBy: "u", note: nil, effectiveDate: "2026-01-08")
+        XCTAssertFalse(MilestoneCompletionLogic.isOnTime(late, dueDate: "2026-01-06", timeZoneId: "UTC"))
+        let onTime = MilestoneCompletion(completedAt: day("2026-01-09"), completedBy: "u", note: nil, effectiveDate: "2026-01-05")
+        XCTAssertTrue(MilestoneCompletionLogic.isOnTime(onTime, dueDate: "2026-01-06", timeZoneId: "UTC"))
     }
 
     func testCurrentBenefitPeriod() {

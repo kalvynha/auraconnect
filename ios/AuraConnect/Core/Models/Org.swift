@@ -13,6 +13,8 @@ struct Org: Codable, Identifiable {
     var name: String?
     var timezone: String?
     var deadlineLeadDays: Int?
+    /// v3 (V1): reminder lead days per milestone kind (raw kind → days). Missing kinds use the defaults.
+    var deadlineLeadDaysByKind: [String: Int]?
     var defaultEscalationPolicyId: String?
     var createdBy: String?
     var createdAt: Date?

@@ -41,6 +41,7 @@ extension BereavementContactType {
         case .letter: return "envelope"
         case .visit: return "house"
         case .mailing: return "mail.stack"
+        case .assessment: return "checklist"
         }
     }
 }

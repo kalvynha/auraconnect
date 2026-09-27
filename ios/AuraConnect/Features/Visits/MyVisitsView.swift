@@ -32,6 +32,7 @@ final class MyVisitsViewModel {
     private(set) var isLoading = true
     var completing: Visit?
     var cancelling: Visit?
+    var rescheduling: Visit?
     var errorMessage: String?
 
     init(orgId: String, uid: String) {
@@ -100,14 +101,8 @@ private struct MyVisitsContent: View {
         _model = State(initialValue: MyVisitsViewModel(orgId: orgId, uid: uid))
     }
 
-    private var canAct: Bool { org.role.canManageCare }
-
-    /// Scheduled or missed (late documentation) visits I may complete: clinical roles, or my own visit.
-    private func canComplete(_ visit: Visit) -> Bool {
-        let status = visit.visitStatus
-        guard status == .scheduled || status == .missed else { return false }
-        return canAct || visit.assignedUid == org.uid
-    }
+    /// v3 (V4): these are my own visits, so the assignee rules apply (Aide/LPN viewers included).
+    private func canComplete(_ visit: Visit) -> Bool { org.canComplete(visit: visit) }
 
     private var emptyDescription: String {
         switch model.range {
@@ -160,13 +155,18 @@ private struct MyVisitsContent: View {
             CancelVisitView(visit: visit)
                 .environment(org)
         }
+        .sheet(item: $model.rescheduling) { visit in
+            RescheduleVisitView(visit: visit)
+                .environment(org)
+        }
         .task(id: model.range) { await model.run() }
     }
 
     @ViewBuilder
     private func row(_ visit: Visit) -> some View {
         let completable = canComplete(visit)
-        let cancellable = canAct && visit.visitStatus == .scheduled
+        let cancellable = org.canCancel(visit: visit)
+        let reschedulable = org.canReschedule(visit: visit)
         Group {
             if let visitId = visit.id {
                 NavigationLink(value: Route.visit(visitId)) {
@@ -191,6 +191,14 @@ private struct MyVisitsContent: View {
             }
         }
         .swipeActions(edge: .trailing) {
+            if reschedulable {
+                Button {
+                    model.rescheduling = visit
+                } label: {
+                    Label("Reschedule", systemImage: "calendar.badge.clock")
+                }
+                .tint(.blue)
+            }
             if cancellable {
                 Button {
                     model.cancelling = visit
@@ -207,6 +215,13 @@ private struct MyVisitsContent: View {
                 } label: {
                     Label(visit.visitStatus == .missed ? "Document missed visit" : "Complete visit",
                           systemImage: "checkmark.circle")
+                }
+            }
+            if reschedulable {
+                Button {
+                    model.rescheduling = visit
+                } label: {
+                    Label("Reschedule", systemImage: "calendar.badge.clock")
                 }
             }
             if cancellable {

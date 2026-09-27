@@ -76,6 +76,7 @@ final class BroadcastDraft {
 
 /// Form sections for a broadcast; embedded in `NewMessageView`.
 struct BroadcastSections: View {
+    @Environment(OrgStore.self) private var org
     @Bindable var draft: BroadcastDraft
     let roles: [OnCallRole]
 
@@ -124,7 +125,8 @@ struct BroadcastSections: View {
         Section("Broadcast") {
             TextField("Name, e.g. Weather closure", text: $draft.name)
             Picker("Priority", selection: $draft.priority) {
-                ForEach(Priority.allCases) { priority in
+                // Critical broadcasts are admin-only (the server rejects them otherwise).
+                ForEach(Priority.allCases.filter { $0 != .critical || org.role == .admin }) { priority in
                     Text(priority.label).tag(priority)
                 }
             }

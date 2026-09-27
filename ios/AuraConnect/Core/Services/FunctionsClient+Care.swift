@@ -15,15 +15,31 @@ extension FunctionsClient {
 
     // MARK: Milestones
 
-    /// Marks milestone `key` (`{kind}:{dueDate}`) complete. Clinical roles only.
-    func completeMilestone(orgId: String, patientId: String, key: String, note: String?) async throws {
-        var payload: [String: Any] = ["orgId": orgId, "patientId": patientId, "key": key]
+    /// Marks milestone `key` (`{kind}:{dueDate}`) complete. RN/NP/MD or admin (intake: NOE only).
+    /// `effectiveDate` (`YYYY-MM-DD`, not in the future) is the actual filing date (v3 S5).
+    func completeMilestone(orgId: String, patientId: String, key: String, note: String?, effectiveDate: String) async throws {
+        var payload: [String: Any] = ["orgId": orgId, "patientId": patientId, "key": key, "effectiveDate": effectiveDate]
         if let note = note?.nilIfBlank { payload["note"] = note }
         _ = try await call("completeMilestone", payload)
     }
 
-    func reopenMilestone(orgId: String, patientId: String, key: String) async throws {
-        _ = try await call("reopenMilestone", ["orgId": orgId, "patientId": patientId, "key": key])
+    /// RN/NP/MD or admin. The completion is kept in `patient.milestoneHistory`.
+    func reopenMilestone(orgId: String, patientId: String, key: String, reason: String? = nil) async throws {
+        var payload: [String: Any] = ["orgId": orgId, "patientId": patientId, "key": key]
+        if let reason = reason?.nilIfBlank { payload["reason"] = reason }
+        _ = try await call("reopenMilestone", payload)
+    }
+
+    /// v3 (S2): merge-patch of the clinical record. `fields` holds only the fields to change, already
+    /// encoded (`NSNull()` clears caregiver / physicians / primary diagnosis). Returns the changed field names.
+    @discardableResult
+    func updatePatientClinical(orgId: String, patientId: String, reason: String, fields: [String: Any]) async throws -> [String] {
+        var payload = fields
+        payload["orgId"] = orgId
+        payload["patientId"] = patientId
+        payload["reason"] = reason.trimmed
+        let response = try await call("updatePatientClinical", payload)
+        return response["changed"] as? [String] ?? []
     }
 
     // MARK: Lifecycle
@@ -39,10 +55,13 @@ extension FunctionsClient {
         ])
     }
 
-    /// `f2fDate` is required by the server when the period has `f2fRequired`.
+    /// `f2fDate` and `f2fBy` are required by the server when the period has `f2fRequired`, and the
+    /// certification date must be within 15 days before the period start (v3 S4). Returns warnings,
+    /// e.g. an F2F outside its window (recorded, but the F2F milestone stays open).
+    @discardableResult
     func recordRecertification(orgId: String, patientId: String, periodNumber: Int,
                                certifyingPhysician: String, certificationDate: String,
-                               f2fDate: String?, f2fBy: String?) async throws {
+                               f2fDate: String?, f2fBy: String?) async throws -> [String] {
         var payload: [String: Any] = [
             "orgId": orgId,
             "patientId": patientId,
@@ -52,7 +71,8 @@ extension FunctionsClient {
         ]
         if let f2fDate = f2fDate?.nilIfBlank { payload["f2fDate"] = f2fDate }
         if let f2fBy = f2fBy?.nilIfBlank { payload["f2fBy"] = f2fBy }
-        _ = try await call("recordRecertification", payload)
+        let response = try await call("recordRecertification", payload)
+        return response["warnings"] as? [String] ?? []
     }
 
     func dischargePatient(orgId: String, patientId: String, dischargeDate: String,
@@ -67,10 +87,12 @@ extension FunctionsClient {
         _ = try await call("dischargePatient", payload)
     }
 
-    /// `time` is local `HH:mm` in the org time zone.
+    /// `time` is local `HH:mm` in the org time zone. `visitId` (v3 O1): the death visit, which is
+    /// completed (ending at the time of death) instead of cancelled.
     func recordDeath(orgId: String, patientId: String, date: String, time: String?,
                      pronouncedBy: String?, location: String?, notes: String?,
-                     bereavementRisk: BereavementRisk, bereavementAssigneeUid: String?) async throws {
+                     bereavementRisk: BereavementRisk, bereavementAssigneeUid: String?,
+                     visitId: String? = nil) async throws {
         var payload: [String: Any] = [
             "orgId": orgId,
             "patientId": patientId,
@@ -82,6 +104,7 @@ extension FunctionsClient {
         if let location = location?.nilIfBlank { payload["location"] = location }
         if let notes = notes?.nilIfBlank { payload["notes"] = notes }
         if let uid = bereavementAssigneeUid?.nilIfBlank { payload["bereavementAssigneeUid"] = uid }
+        if let visitId = visitId?.nilIfBlank { payload["visitId"] = visitId }
         _ = try await call("recordDeath", payload)
     }
 

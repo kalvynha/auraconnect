@@ -60,6 +60,12 @@ struct AlertDetailView: View {
 private struct AlertDetailContent: View {
     @Environment(OrgStore.self) private var org
     @State private var model: AlertDetailViewModel
+    @State private var resolvingCallId: String?
+
+    private func triageCallId(_ alert: AuraAlert) -> String? {
+        guard alert.source?.type == "triage" else { return nil }
+        return alert.source?.callId?.nilIfBlank
+    }
 
     init(orgId: String, alertId: String) {
         _model = State(initialValue: AlertDetailViewModel(orgId: orgId, alertId: alertId))
@@ -79,6 +85,15 @@ private struct AlertDetailContent: View {
         }
         .navigationTitle("Alert")
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(item: Binding(
+            get: { resolvingCallId.map { IdentifiedCallId(id: $0) } },
+            set: { resolvingCallId = $0?.id }
+        )) { item in
+            TriageResolveFromAlertSheet(orgId: model.orgId, callId: item.id) {
+                await model.resolve()
+            }
+            .environment(org)
+        }
         .task { await model.run() }
     }
 
@@ -99,7 +114,14 @@ private struct AlertDetailContent: View {
                     if let text = alert.body?.nilIfBlank {
                         Text(text)
                             .font(.body)
-                            .textSelection(.enabled)
+                            // L4: no system text selection on PHI; copy is local-only and expires.
+                            .contextMenu {
+                                Button {
+                                    SecurePasteboard.copy(text)
+                                } label: {
+                                    Label("Copy", systemImage: "doc.on.doc")
+                                }
+                            }
                     }
                     Text(RelativeTime.full(alert.createdAt))
                         .font(.caption)
@@ -123,12 +145,22 @@ private struct AlertDetailContent: View {
                         }
                         .disabled(model.isWorking)
                     }
-                    Button {
-                        Task { await model.resolve() }
-                    } label: {
-                        Label("Resolve", systemImage: "checkmark.seal.fill")
+                    if let callId = triageCallId(alert) {
+                        // O3: resolving a triage alert means resolving the call (disposition, visit, follow-up).
+                        Button {
+                            resolvingCallId = callId
+                        } label: {
+                            Label("Resolve call…", systemImage: "checkmark.seal.fill")
+                        }
+                        .disabled(model.isWorking)
+                    } else {
+                        Button {
+                            Task { await model.resolve() }
+                        } label: {
+                            Label("Resolve", systemImage: "checkmark.seal.fill")
+                        }
+                        .disabled(model.isWorking)
                     }
-                    .disabled(model.isWorking)
                 } footer: {
                     if alert.alertStatus == .open {
                         Text("Acknowledging stops escalation to the next person in the policy.")
@@ -193,5 +225,53 @@ private struct AlertDetailContent: View {
                 }
             }
         }
+    }
+}
+
+private struct IdentifiedCallId: Identifiable {
+    let id: String
+}
+
+/// O3: loads the triage call behind an alert and shows its resolve form. If the call is already
+/// resolved (or unavailable), the alert itself is resolved instead.
+private struct TriageResolveFromAlertSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var model: TriageCallDetailViewModel
+    /// Keeps the form up once shown, so the call turning "resolved" on submit doesn't swap the view.
+    @State private var showedForm = false
+    let resolveAlertOnly: () async -> Void
+
+    init(orgId: String, callId: String, resolveAlertOnly: @escaping () async -> Void) {
+        _model = State(initialValue: TriageCallDetailViewModel(orgId: orgId, callId: callId))
+        self.resolveAlertOnly = resolveAlertOnly
+    }
+
+    var body: some View {
+        Group {
+            if let call = model.call, call.isOpen || showedForm {
+                TriageResolveSheet(model: model)
+                    .onAppear { showedForm = true }
+            } else if model.isLoading {
+                ProgressView()
+            } else {
+                NavigationStack {
+                    ContentUnavailableView {
+                        Label("Call already resolved", systemImage: "checkmark.seal")
+                    } description: {
+                        Text("The triage call is resolved or unavailable. Resolve just the alert?")
+                    } actions: {
+                        Button("Resolve alert") {
+                            Task {
+                                await resolveAlertOnly()
+                                dismiss()
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        Button("Cancel") { dismiss() }
+                    }
+                }
+            }
+        }
+        .task { await model.run() }
     }
 }

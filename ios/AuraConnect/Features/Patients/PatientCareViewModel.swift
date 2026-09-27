@@ -32,6 +32,10 @@ enum PatientCareSheet: Identifiable {
     case recertify
     case discharge
     case recordDeath
+    /// O1: record death from the visit in progress (the visit is completed, not cancelled).
+    case recordDeathFromVisit(Visit)
+    /// S2: edit code status, allergies, medications, contacts, physicians, diagnoses.
+    case editClinical
 
     var id: String {
         switch self {
@@ -47,6 +51,8 @@ enum PatientCareSheet: Identifiable {
         case .recertify: return "recertify"
         case .discharge: return "discharge"
         case .recordDeath: return "recordDeath"
+        case .recordDeathFromVisit(let visit): return "recordDeath-\(visit.id ?? "")"
+        case .editClinical: return "editClinical"
         }
     }
 }
@@ -77,6 +83,8 @@ final class PatientCareViewModel {
     /// Milestone awaiting the "complete" confirmation (with an optional note).
     var milestoneToComplete: MilestoneItem?
     var milestoneNote = ""
+    /// S5: the actual filing date for the milestone being completed (defaults to today).
+    var milestoneEffectiveDate = Date()
     /// Local (file-protected) copy of a document being previewed with QuickLook.
     var previewURL: URL?
     var errorMessage: String?
@@ -187,28 +195,30 @@ final class PatientCareViewModel {
 
     func requestComplete(_ item: MilestoneItem) {
         milestoneNote = ""
+        milestoneEffectiveDate = Date()
         milestoneToComplete = item
     }
 
-    func completeMilestone(_ item: MilestoneItem, note: String) async {
+    func completeMilestone(_ item: MilestoneItem, note: String, effectiveDate: Date) async {
         let key = item.completionKey
         guard workingMilestoneKey == nil else { return }
         workingMilestoneKey = key
         defer { workingMilestoneKey = nil }
         do {
-            try await functions.completeMilestone(orgId: orgId, patientId: patientId, key: key, note: note)
+            try await functions.completeMilestone(orgId: orgId, patientId: patientId, key: key, note: note,
+                                                  effectiveDate: ISODate.string(from: min(effectiveDate, Date())))
         } catch {
             errorMessage = error.userMessage
         }
     }
 
-    func reopenMilestone(_ item: MilestoneItem) async {
+    func reopenMilestone(_ item: MilestoneItem, reason: String? = nil) async {
         let key = item.completionKey
         guard workingMilestoneKey == nil else { return }
         workingMilestoneKey = key
         defer { workingMilestoneKey = nil }
         do {
-            try await functions.reopenMilestone(orgId: orgId, patientId: patientId, key: key)
+            try await functions.reopenMilestone(orgId: orgId, patientId: patientId, key: key, reason: reason)
         } catch {
             errorMessage = error.userMessage
         }

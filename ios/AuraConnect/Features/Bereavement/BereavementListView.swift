@@ -7,6 +7,7 @@ struct DueBereavementContact: Identifiable {
     let planId: String
     let contact: BereavementContact
     var id: String { "\(planId)/\(contact.id)" }
+    var ref: BereavementContactRef { BereavementContactRef(planId: planId, contactId: contact.id) }
 }
 
 /// Contact being marked done / skipped with an optional note.
@@ -23,9 +24,18 @@ final class BereavementListViewModel {
     let orgId: String
     let uid: String
     private(set) var plans: [BereavementPlan] = []
+    private(set) var closedPlans: [BereavementPlan] = []
     private(set) var isLoading = true
+    private(set) var closedLoading = false
+    private(set) var isBulkWorking = false
     var onlyMine = false
+    var showClosed = false
+    /// Closed plans are paged: the listener limit grows by `closedPageSize`.
+    var closedLimit = BereavementRepository.closedPageSize
+    var isSelecting = false
+    var selection: Set<String> = []
     var errorMessage: String?
+    var bulkResult: String?
 
     /// Contacts due within this many days are listed under "Due".
     static let dueWindowDays = 7
@@ -47,6 +57,22 @@ final class BereavementListViewModel {
         }
     }
 
+    func runClosed(limit: Int) async {
+        closedLoading = true
+        do {
+            for try await list in BereavementRepository(orgId: orgId).closedPlans(limit: limit) {
+                closedPlans = list
+                closedLoading = false
+            }
+        } catch {
+            closedLoading = false
+            errorMessage = error.userMessage
+        }
+    }
+
+    var hitActiveLimit: Bool { plans.count >= BereavementRepository.activeLimit }
+    var hasMoreClosed: Bool { closedPlans.count >= closedLimit }
+
     var visiblePlans: [BereavementPlan] {
         plans
             .filter { !onlyMine || $0.assignedUid == uid }
@@ -64,6 +90,33 @@ final class BereavementListViewModel {
             }
             .sorted { $0.contact.dueDate < $1.contact.dueDate }
     }
+
+    func toggle(_ item: DueBereavementContact) {
+        if selection.contains(item.id) {
+            selection.remove(item.id)
+        } else {
+            selection.insert(item.id)
+        }
+    }
+
+    /// Marks the selected contacts done or skipped (`updateBereavementContacts`).
+    func applyBulk(_ status: BereavementContactStatus, due: [DueBereavementContact]) async {
+        let refs = due.filter { selection.contains($0.id) }.map(\.ref)
+        guard !refs.isEmpty, !isBulkWorking else { return }
+        isBulkWorking = true
+        defer { isBulkWorking = false }
+        do {
+            let result = try await FunctionsClient().updateBereavementContacts(orgId: orgId, items: refs, status: status, note: nil)
+            selection = []
+            isSelecting = false
+            let verb = status == .done ? "marked done" : "skipped"
+            bulkResult = result.failed == 0
+                ? "\(result.updated) contact\(result.updated == 1 ? "" : "s") \(verb)."
+                : "\(result.updated) \(verb); \(result.failed) could not be updated (plan closed or not yours)."
+        } catch {
+            errorMessage = error.userMessage
+        }
+    }
 }
 
 /// Active bereavement plans and the family contacts that are due.
@@ -71,7 +124,13 @@ struct BereavementListView: View {
     @Environment(OrgStore.self) private var org
 
     var body: some View {
-        BereavementListContent(orgId: org.orgId, uid: org.uid)
+        if org.isVolunteerMember {
+            ContentUnavailableView("Not available",
+                                   systemImage: "heart.circle",
+                                   description: Text("Bereavement plans are not available to volunteers."))
+        } else {
+            BereavementListContent(orgId: org.orgId, uid: org.uid)
+        }
     }
 }
 
@@ -84,11 +143,10 @@ private struct BereavementListContent: View {
         _model = State(initialValue: BereavementListViewModel(orgId: orgId, uid: uid))
     }
 
-    private var canEdit: Bool { org.role.canSendMessages }
-
     var body: some View {
         @Bindable var model = model
         let due = model.dueContacts(today: Date())
+        let workable = due.filter { org.canWorkBereavementPlan($0.plan) }
         let plans = model.visiblePlans
         List {
             Section {
@@ -103,60 +161,147 @@ private struct BereavementListContent: View {
                         .foregroundStyle(.secondary)
                 }
                 ForEach(due) { item in
-                    BereavementContactRow(contact: item.contact, patientName: item.plan.displayPatientName)
-                        .swipeActions(edge: .leading) {
-                            if canEdit {
-                                Button {
-                                    action = BereavementContactAction(planId: item.planId, contact: item.contact, status: .done)
-                                } label: {
-                                    Label("Done", systemImage: "checkmark")
-                                }
-                                .tint(.green)
-                            }
-                        }
-                        .swipeActions(edge: .trailing) {
-                            if canEdit {
-                                Button {
-                                    action = BereavementContactAction(planId: item.planId, contact: item.contact, status: .skipped)
-                                } label: {
-                                    Label("Skip", systemImage: "forward")
-                                }
-                                .tint(.gray)
-                            }
-                        }
+                    dueRow(item)
                 }
             } header: {
                 Text("Contacts due")
             } footer: {
-                if canEdit && !due.isEmpty {
-                    Text("Swipe right to mark a contact done, left to skip it.")
+                if model.isSelecting {
+                    Text("Tap contacts to select them, then mark them done or skipped together.")
+                } else if !workable.isEmpty {
+                    Text("Swipe right to mark a contact done, left to skip it, or tap Select to update several at once.")
                 }
             }
-            Section("Active plans (\(plans.count))") {
+            Section {
                 ForEach(plans) { plan in
-                    if let id = plan.id {
-                        NavigationLink(value: Route.bereavementPlan(id)) {
-                            BereavementPlanRow(plan: plan)
-                        }
+                    planLink(plan)
+                }
+            } header: {
+                Text("Active plans (\(plans.count))")
+            } footer: {
+                if model.hitActiveLimit {
+                    Text("Showing the first \(BereavementRepository.activeLimit) active plans.")
+                }
+            }
+            Section {
+                Toggle("Show closed plans", isOn: $model.showClosed)
+                if model.showClosed {
+                    ForEach(model.closedPlans) { plan in
+                        planLink(plan)
+                    }
+                    if model.closedLoading {
+                        ProgressView()
+                    } else if model.hasMoreClosed {
+                        Button("Load more") { model.closedLimit += BereavementRepository.closedPageSize }
+                    } else if model.closedPlans.isEmpty {
+                        Text("No closed plans.").foregroundStyle(.secondary)
                     }
                 }
+            } header: {
+                Text("Closed plans")
             }
         }
         .overlay {
             if model.isLoading {
                 ProgressView()
-            } else if model.plans.isEmpty && model.errorMessage == nil {
-                ContentUnavailableView("No active plans",
-                                       systemImage: "heart.circle",
-                                       description: Text("Bereavement plans are created when a patient's death is recorded."))
             }
         }
         .navigationTitle("Bereavement")
+        .toolbar {
+            if !workable.isEmpty || model.isSelecting {
+                ToolbarItem(placement: .primaryAction) {
+                    Button(model.isSelecting ? "Cancel" : "Select") {
+                        model.isSelecting.toggle()
+                        model.selection = []
+                    }
+                }
+            }
+            if model.isSelecting {
+                ToolbarItemGroup(placement: .bottomBar) {
+                    Button("Skip (\(model.selection.count))") {
+                        Task { await model.applyBulk(.skipped, due: workable) }
+                    }
+                    .disabled(model.selection.isEmpty || model.isBulkWorking)
+                    Spacer()
+                    if model.isBulkWorking {
+                        ProgressView()
+                    }
+                    Spacer()
+                    Button("Mark done (\(model.selection.count))") {
+                        Task { await model.applyBulk(.done, due: workable) }
+                    }
+                    .fontWeight(.semibold)
+                    .disabled(model.selection.isEmpty || model.isBulkWorking)
+                }
+            }
+        }
+        .alert("Bereavement", isPresented: Binding(
+            get: { model.bulkResult != nil },
+            set: { if !$0 { model.bulkResult = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(model.bulkResult ?? "")
+        }
         .sheet(item: $action) { action in
             BereavementContactUpdateView(action: action)
                 .environment(org)
         }
         .task { await model.run() }
+        .task(id: model.showClosed ? model.closedLimit : 0) { [limit = model.showClosed ? model.closedLimit : 0] in
+            if limit > 0 { await model.runClosed(limit: limit) }
+        }
+    }
+
+    @ViewBuilder
+    private func planLink(_ plan: BereavementPlan) -> some View {
+        if let id = plan.id {
+            NavigationLink(value: Route.bereavementPlan(id)) {
+                BereavementPlanRow(plan: plan)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func dueRow(_ item: DueBereavementContact) -> some View {
+        let canEdit = org.canWorkBereavementPlan(item.plan)
+        if model.isSelecting {
+            Button {
+                if canEdit { model.toggle(item) }
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: model.selection.contains(item.id) ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(canEdit ? Color.accentColor : Color.secondary)
+                        .accessibilityHidden(true)
+                    BereavementContactRow(contact: item.contact, patientName: item.plan.displayPatientName)
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(!canEdit)
+            .accessibilityAddTraits(model.selection.contains(item.id) ? .isSelected : [])
+        } else {
+            BereavementContactRow(contact: item.contact, patientName: item.plan.displayPatientName)
+                .swipeActions(edge: .leading) {
+                    if canEdit {
+                        Button {
+                            action = BereavementContactAction(planId: item.planId, contact: item.contact, status: .done)
+                        } label: {
+                            Label("Done", systemImage: "checkmark")
+                        }
+                        .tint(.green)
+                    }
+                }
+                .swipeActions(edge: .trailing) {
+                    if canEdit {
+                        Button {
+                            action = BereavementContactAction(planId: item.planId, contact: item.contact, status: .skipped)
+                        } label: {
+                            Label("Skip", systemImage: "forward")
+                        }
+                        .tint(.gray)
+                    }
+                }
+        }
     }
 }
 
@@ -170,14 +315,21 @@ struct BereavementPlanRow: View {
             HStack {
                 Text(plan.displayPatientName).font(.headline)
                 Spacer()
-                StatusPill(text: plan.risk.label, color: plan.risk.color)
+                if plan.needsReview == true && plan.planStatus == .active {
+                    StatusPill(text: "Needs review", color: .orange)
+                }
+                if plan.planStatus == .closed {
+                    StatusPill(text: "Closed", color: .secondary)
+                } else {
+                    StatusPill(text: plan.risk.label, color: plan.risk.color)
+                }
             }
             Text("Died \(ISODate.display(plan.deathDate)) · closes \(ISODate.display(plan.closesOn))")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             HStack(spacing: 6) {
                 Text(plan.assignedUid.map { org.name(for: $0) } ?? "Unassigned")
-                if dueCount > 0 {
+                if dueCount > 0 && plan.planStatus == .active {
                     Text("· \(dueCount) due").foregroundStyle(.orange)
                 }
             }
@@ -243,8 +395,15 @@ struct BereavementContactUpdateView: View {
     @State private var isSubmitting = false
     @State private var errorMessage: String?
 
-    private var title: String { action.status == .done ? "Mark done" : "Skip contact" }
-    private var notePrompt: String { action.status == .done ? "How did it go? (optional)" : "Why skipped? (optional)" }
+    private var title: String {
+        switch action.status {
+        case .done: return "Mark done"
+        case .skipped: return "Skip contact"
+        case .pending: return "Mark pending"
+        }
+    }
+
+    private var notePrompt: String { action.status == .done ? "How did it go? (optional)" : "Why? (optional)" }
 
     var body: some View {
         NavigationStack {
@@ -269,7 +428,8 @@ struct BereavementContactUpdateView: View {
                     Button("Cancel") { dismiss() }.disabled(isSubmitting)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    CareSubmitButton(title: action.status == .done ? "Done" : "Skip", isWorking: isSubmitting, isEnabled: true) {
+                    CareSubmitButton(title: action.status == .done ? "Done" : action.status == .skipped ? "Skip" : "Save",
+                                     isWorking: isSubmitting, isEnabled: true) {
                         Task { await submit() }
                     }
                 }

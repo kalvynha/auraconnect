@@ -6,6 +6,7 @@ import SwiftUI
 // MARK: - Milestones
 
 /// Hospice milestones with completion state and complete / reopen actions.
+/// H4: completing needs RN/NP/MD or admin (intake may file the NOE); reopening needs RN/NP/MD or admin.
 struct PatientMilestonesSection: View {
     @Environment(OrgStore.self) private var org
     let patient: Patient
@@ -13,9 +14,17 @@ struct PatientMilestonesSection: View {
     let care: PatientCareViewModel
     let canEdit: Bool
 
+    private func canComplete(_ item: MilestoneItem) -> Bool {
+        canEdit && (org.isLicensed || (org.role == .intake && item.kind == .noe))
+    }
+
+    private var canReopen: Bool { canEdit && org.isLicensed }
+
     var body: some View {
-        let items = MilestoneLogic.items(for: milestones, today: Date(), leadDays: org.leadDays)
         let completions = patient.completions
+        let items = MilestoneLogic.items(for: milestones, today: Date(), leadDays: org.leadDays,
+                                         leadDaysByKind: org.org?.deadlineLeadDaysByKind,
+                                         completedKeys: Set(completions.keys))
         Section {
             if items.isEmpty {
                 Text("No milestones computed").foregroundStyle(.secondary)
@@ -27,38 +36,36 @@ struct PatientMilestonesSection: View {
                              onTime: completion.map { MilestoneCompletionLogic.isOnTime($0, dueDate: item.dueDate, timeZoneId: org.org?.timezone) } ?? true,
                              isWorking: care.workingMilestoneKey == item.completionKey)
                     .swipeActions(edge: .trailing) {
-                        if canEdit {
-                            if completion == nil {
-                                Button {
-                                    care.requestComplete(item)
-                                } label: {
-                                    Label("Complete", systemImage: "checkmark")
-                                }
-                                .tint(.green)
-                            } else {
-                                Button {
-                                    Task { await care.reopenMilestone(item) }
-                                } label: {
-                                    Label("Reopen", systemImage: "arrow.uturn.backward")
-                                }
-                                .tint(.orange)
+                        if completion == nil && canComplete(item) {
+                            Button {
+                                care.requestComplete(item)
+                            } label: {
+                                Label("Complete", systemImage: "checkmark")
                             }
+                            .tint(.green)
+                        }
+                        if completion != nil && canReopen {
+                            Button {
+                                Task { await care.reopenMilestone(item) }
+                            } label: {
+                                Label("Reopen", systemImage: "arrow.uturn.backward")
+                            }
+                            .tint(.orange)
                         }
                     }
                     .contextMenu {
-                        if canEdit {
-                            if completion == nil {
-                                Button {
-                                    care.requestComplete(item)
-                                } label: {
-                                    Label("Mark complete", systemImage: "checkmark.circle")
-                                }
-                            } else {
-                                Button {
-                                    Task { await care.reopenMilestone(item) }
-                                } label: {
-                                    Label("Reopen", systemImage: "arrow.uturn.backward.circle")
-                                }
+                        if completion == nil && canComplete(item) {
+                            Button {
+                                care.requestComplete(item)
+                            } label: {
+                                Label("Mark filed / complete", systemImage: "checkmark.circle")
+                            }
+                        }
+                        if completion != nil && canReopen {
+                            Button {
+                                Task { await care.reopenMilestone(item) }
+                            } label: {
+                                Label("Reopen", systemImage: "arrow.uturn.backward.circle")
                             }
                         }
                     }
@@ -67,8 +74,86 @@ struct PatientMilestonesSection: View {
             Text("Hospice milestones")
         } footer: {
             Text(canEdit
-                 ? "Swipe a milestone to mark it complete or reopen it. Computed from CMS hospice rules at admission; verify with your compliance team."
+                 ? "Swipe a milestone to mark it filed or reopen it. Computed from CMS hospice rules at admission; verify with your compliance team."
                  : "Computed from CMS hospice rules at admission. Verify with your compliance team.")
+        }
+
+        let history = Array((patient.milestoneHistory ?? []).reversed())
+        if !history.isEmpty {
+            Section {
+                ForEach(Array(history.enumerated()), id: \.offset) { _, entry in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text([entry.kind?.label, entry.dueDate.map { "due \(ISODate.display($0))" }].compactMap { $0 }.joined(separator: " · "))
+                        if let filed = entry.effectiveDate?.nilIfBlank {
+                            Text("Filed \(ISODate.display(filed)) · recorded by \(org.name(for: entry.completedBy))")
+                                .font(.caption).foregroundStyle(.secondary)
+                        } else {
+                            Text("Completed by \(org.name(for: entry.completedBy))")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Text("Reopened \(RelativeTime.full(entry.reopenedAt)) by \(org.name(for: entry.reopenedBy))")
+                            .font(.caption).foregroundStyle(.secondary)
+                        if let reason = entry.reopenReason?.nilIfBlank {
+                            Text(reason).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    .accessibilityElement(children: .combine)
+                }
+            } header: {
+                Text("Milestone history")
+            }
+        }
+    }
+}
+
+/// S5: mark a milestone filed with its actual filing date (defaults to today, never in the future).
+struct CompleteMilestoneView: View {
+    @Environment(\.dismiss) private var dismiss
+    let item: MilestoneItem
+    let care: PatientCareViewModel
+
+    @State private var effectiveDate = Date()
+    @State private var note = ""
+
+    private var isLate: Bool { ISODate.string(from: effectiveDate) > item.dueDate }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    LabeledContent("Milestone", value: item.title)
+                    LabeledContent("Due", value: ISODate.display(item.dueDate))
+                }
+                Section {
+                    DatePicker("Date filed", selection: $effectiveDate, in: ...Date(), displayedComponents: .date)
+                    if isLate {
+                        Label("After the due date: this will be recorded as late.", systemImage: "exclamationmark.triangle.fill")
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+                    }
+                } footer: {
+                    Text("The actual filing or completion date. On time is judged from this date, not from when you record it.")
+                }
+                Section("Note") {
+                    TextField("Optional (confirmation number, who filed it)", text: $note, axis: .vertical)
+                        .lineLimit(1...4)
+                }
+            }
+            .navigationTitle("Mark filed")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        let date = effectiveDate
+                        let text = note
+                        dismiss()
+                        Task { await care.completeMilestone(item, note: text, effectiveDate: date) }
+                    }
+                }
+            }
         }
     }
 }
@@ -113,9 +198,15 @@ private struct MilestoneRow: View {
                         .foregroundStyle(.secondary)
                 }
                 if let completion {
-                    Text("Completed \(RelativeTime.full(completion.completedAt)) by \(org.name(for: completion.completedBy))")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    if let filed = completion.effectiveDate?.nilIfBlank {
+                        Text("Filed \(ISODate.display(filed)) · recorded by \(org.name(for: completion.completedBy))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Completed \(RelativeTime.full(completion.completedAt)) by \(org.name(for: completion.completedBy))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                     if let note = completion.note?.nilIfBlank {
                         Text(note).font(.caption).foregroundStyle(.secondary)
                     }
@@ -170,6 +261,8 @@ struct PatientVisitsSections: View {
 
     private var canAct: Bool { org.role.canManageCare }
     private var canSchedule: Bool { canAct && patient.patientStatus == .admitted }
+    /// O1/H4: a licensed clinician can record the death from the visit in progress.
+    private var canRecordDeath: Bool { canAct && org.isLicensed && patient.patientStatus == .admitted }
 
     var body: some View {
         Section {
@@ -253,13 +346,22 @@ struct PatientVisitsSections: View {
                             Label("Cancel visit", systemImage: "xmark.circle")
                         }
                     }
+                    if canRecordDeath {
+                        Button(role: .destructive) {
+                            care.sheet = .recordDeathFromVisit(visit)
+                        } label: {
+                            Label("Record death from this visit", systemImage: "heart.slash")
+                        }
+                    }
                 }
             }
         } header: {
             Text("Scheduled")
         } footer: {
             if canAct && !care.scheduledVisits.isEmpty {
-                Text("Tap a visit to edit it; swipe to complete or cancel.")
+                Text(canRecordDeath
+                     ? "Tap a visit to edit it; swipe to complete or cancel. Touch and hold a visit to record a death from it."
+                     : "Tap a visit to edit it; swipe to complete or cancel.")
             }
         }
 

@@ -48,7 +48,13 @@ struct BereavementPlanDetailView: View {
     let planId: String
 
     var body: some View {
-        BereavementPlanDetailContent(orgId: org.orgId, planId: planId)
+        if org.isVolunteerMember {
+            ContentUnavailableView("Not available",
+                                   systemImage: "heart.slash",
+                                   description: Text("Bereavement plans are not available to volunteers."))
+        } else {
+            BereavementPlanDetailContent(orgId: org.orgId, planId: planId)
+        }
     }
 }
 
@@ -62,7 +68,8 @@ private struct BereavementPlanDetailContent: View {
         _model = State(initialValue: BereavementPlanViewModel(orgId: orgId, planId: planId))
     }
 
-    private var canEdit: Bool { org.role.canSendMessages }
+    /// Coordinator, SW/Chaplain, `bereavement` capability or admin (server enforces the same).
+    private var canEdit: Bool { model.plan.map { org.canWorkBereavementPlan($0) } ?? false }
 
     var body: some View {
         Group {
@@ -117,21 +124,16 @@ private struct BereavementPlanDetailContent: View {
                 }
             }
 
-            if let contact = plan.primaryContact, !contact.isEmpty {
-                Section("Primary contact") {
-                    InfoRow(label: "Name", value: contact.name)
-                    InfoRow(label: "Relationship", value: contact.relationship)
-                    if let phone = contact.phone?.nilIfBlank {
-                        LabeledContent("Phone") {
-                            if let url = URL(string: "tel:\(phone.filter { $0.isNumber || $0 == "+" })") {
-                                Link(phone, destination: url)
-                            } else {
-                                Text(phone)
-                            }
-                        }
-                    }
+            if plan.needsReview == true && plan.planStatus == .active {
+                Section {
+                    Label("This plan passed its close date with contacts still pending. Mark them done or skipped; it then closes automatically.",
+                          systemImage: "exclamationmark.triangle")
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
                 }
             }
+
+            BereavementSurvivorsSection(survivors: plan.survivorList)
 
             Section {
                 if canEdit && plan.planStatus == .active {

@@ -25,6 +25,7 @@ final class ReferralsViewModel {
         QueueSection(title: "Failed", statuses: [.failed]),
         QueueSection(title: "Accepted", statuses: [.accepted]),
         QueueSection(title: "Rejected", statuses: [.rejected]),
+        QueueSection(title: "Non-admit", statuses: [.nonAdmit]),
     ]
 
     func referrals(in statuses: [ReferralStatus]) -> [Referral] {
@@ -58,6 +59,7 @@ private struct ReferralsListContent: View {
     @Environment(Router.self) private var router
     @State private var model: ReferralsViewModel
     @State private var showScan = false
+    @State private var showPhone = false
 
     init(orgId: String) {
         _model = State(initialValue: ReferralsViewModel(orgId: orgId))
@@ -100,16 +102,34 @@ private struct ReferralsListContent: View {
         .navigationTitle("Referrals")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Button {
-                    showScan = true
+                Menu {
+                    Button {
+                        showScan = true
+                    } label: {
+                        Label("Scan or import documents", systemImage: "doc.viewfinder")
+                    }
+                    Button {
+                        showPhone = true
+                    } label: {
+                        Label("New phone referral", systemImage: "phone.badge.plus")
+                    }
                 } label: {
-                    Label("Scan referral", systemImage: "doc.viewfinder")
+                    Label("New referral", systemImage: "plus")
                 }
             }
         }
         .sheet(isPresented: $showScan) {
-            ReferralScanView { referralId in
+            ReferralScanView { referralIds in
                 showScan = false
+                if referralIds.count == 1, let id = referralIds.first {
+                    router.push(.referral(id))
+                }
+            }
+            .environment(org)
+        }
+        .sheet(isPresented: $showPhone) {
+            PhoneReferralView { referralId in
+                showPhone = false
                 router.push(.referral(referralId))
             }
             .environment(org)
@@ -119,6 +139,7 @@ private struct ReferralsListContent: View {
 }
 
 struct ReferralRow: View {
+    @Environment(OrgStore.self) private var org
     let referral: Referral
 
     var body: some View {
@@ -131,13 +152,25 @@ struct ReferralRow: View {
                 StatusPill(text: referral.referralStatus.label, color: referral.referralStatus.color)
             }
             HStack(spacing: 6) {
-                if referral.referralStatus.isProcessing {
+                if referral.isStale() {
+                    StatusPill(text: "Stuck", color: .red)
+                } else if referral.referralStatus.isProcessing {
                     ProgressView().controlSize(.mini)
+                }
+                if !referral.duplicates.isEmpty && referral.referralStatus != .accepted {
+                    StatusPill(text: "Possible duplicate", color: .orange)
                 }
                 Text(RelativeTime.full(referral.createdAt))
                 if let source = referral.extracted?.referralSource?.nilIfBlank {
                     Text("· \(source)").lineLimit(1)
+                } else if referral.source == .phone {
+                    Text("· Phone")
                 }
+            }
+            if let reviewer = referral.activeClaimant(), reviewer != org.uid {
+                Label("\(org.name(for: reviewer)) is reviewing", systemImage: "person.fill.checkmark")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
             }
             .font(.caption)
             .foregroundStyle(.secondary)

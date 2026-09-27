@@ -186,9 +186,10 @@ final class NewIdgMeetingViewModel {
 
     func runPatients() async {
         do {
-            for try await list in PatientRepository(orgId: orgId).patients() {
+            // Bounded: admitted patients only (status == admitted, server-side).
+            for try await list in PatientRepository(orgId: orgId).patients(status: .admitted) {
                 patients = list
-                    .filter { $0.id != nil && $0.patientStatus == .admitted }
+                    .filter { $0.id != nil }
                     .sorted { $0.sortName.localizedCaseInsensitiveCompare($1.sortName) == .orderedAscending }
             }
         } catch {

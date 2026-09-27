@@ -44,11 +44,16 @@ final class PatientsViewModel {
             .sorted { $0.sortName.localizedCaseInsensitiveCompare($1.sortName) == .orderedAscending }
     }
 
-    func run() async {
+    /// `audience` is `OrgStore.patientAudienceKey`: volunteers may only query their assigned
+    /// patients (`volunteerUids` array-contains); nothing runs until the member doc is known.
+    func run(audience: String = "staff") async {
         isLoading = true
         errorMessage = nil
+        if audience == "unknown" { return }
         let repository = PatientRepository(orgId: orgId)
-        let stream = scope == .mine
+        let stream = audience == "volunteer"
+            ? repository.patients(volunteerMember: uid)
+            : scope == .mine
             ? repository.patients(careTeamMember: uid)
             : repository.patients(status: status)
         do {
@@ -93,14 +98,16 @@ private struct PatientListContent: View {
         @Bindable var model = model
         List {
             Section {
-                Picker("Patients", selection: $model.scope) {
-                    ForEach(PatientsViewModel.Scope.allCases) { scope in
-                        Text(scope.rawValue).tag(scope)
+                if !org.isVolunteerMember {
+                    Picker("Patients", selection: $model.scope) {
+                        ForEach(PatientsViewModel.Scope.allCases) { scope in
+                            Text(scope.rawValue).tag(scope)
+                        }
                     }
+                    .pickerStyle(.segmented)
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
                 }
-                .pickerStyle(.segmented)
-                .listRowBackground(Color.clear)
-                .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
                 Picker("Status", selection: $model.status) {
                     ForEach(PatientStatus.allCases) { status in
                         Text(status.label).tag(status)
@@ -154,7 +161,9 @@ private struct PatientListContent: View {
             }
             .environment(org)
         }
-        .task(id: model.queryKey) { await model.run() }
+        .task(id: "\(model.queryKey)|\(org.patientAudienceKey)") { [audience = org.patientAudienceKey] in
+            await model.run(audience: audience)
+        }
     }
 }
 

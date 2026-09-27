@@ -53,9 +53,16 @@ private struct PatientDetailContent: View {
         _care = State(initialValue: PatientCareViewModel(orgId: orgId, patientId: patientId))
     }
 
-    /// Lifecycle actions (level of care, recert, discharge, death): clinical roles, admitted patients.
+    /// Lifecycle actions (level of care, recert, discharge, death): H4 — RN/NP/MD or admin, admitted patients.
     private var canRunLifecycle: Bool {
-        org.role.canManageCare && model.patient?.patientStatus == .admitted
+        org.role.canManageCare && org.isLicensed && model.patient?.patientStatus == .admitted
+    }
+
+    /// S2: licensed care-team members or admins may edit the clinical record (the server re-checks).
+    private func canEditClinical(_ patient: Patient) -> Bool {
+        guard org.role.canManageCare, org.isLicensed else { return false }
+        guard patient.patientStatus == .admitted || patient.patientStatus == .referral else { return false }
+        return org.role == .admin || (patient.careTeamUids ?? []).contains(org.uid)
     }
 
     var body: some View {
@@ -92,8 +99,13 @@ private struct PatientDetailContent: View {
             Button("Cancel", role: .cancel) {}
         }
         .task { await model.run() }
-        .task { await care.runVisits() }
-        .task { await care.runTasks() }
+        // Volunteers cannot read visits or tasks (firestore.rules): never subscribe for them.
+        .task(id: org.canReadStaffCollections) { [allowed = org.canReadStaffCollections] in
+            if allowed { await care.runVisits() }
+        }
+        .task(id: org.canReadStaffCollections) { [allowed = org.canReadStaffCollections] in
+            if allowed { await care.runTasks() }
+        }
         .task { await care.runDocuments() }
         .task { await care.runEvents() }
         .sheet(isPresented: $showAdmit) {
@@ -112,18 +124,8 @@ private struct PatientDetailContent: View {
         .onChange(of: care.previewURL) { oldValue, newValue in
             if newValue == nil { PatientCareViewModel.removeTemporaryFile(oldValue) }
         }
-        .alert("Complete milestone", isPresented: Binding(
-            get: { care.milestoneToComplete != nil },
-            set: { if !$0 { care.milestoneToComplete = nil } }
-        ), presenting: care.milestoneToComplete) { item in
-            TextField("Note (optional)", text: $care.milestoneNote)
-            Button("Complete") {
-                let note = care.milestoneNote
-                Task { await care.completeMilestone(item, note: note) }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: { item in
-            Text("\(item.title), due \(ISODate.display(item.dueDate))")
+        .sheet(item: $care.milestoneToComplete) { item in
+            CompleteMilestoneView(item: item, care: care)
         }
         .alert("Patient", isPresented: Binding(
             get: { care.errorMessage != nil },
@@ -164,6 +166,10 @@ private struct PatientDetailContent: View {
             if let patient { DischargePatientView(patient: patient) }
         case .recordDeath:
             if let patient { RecordDeathView(patient: patient) }
+        case .recordDeathFromVisit(let visit):
+            if let patient { RecordDeathView(patient: patient, visitId: visit.id) }
+        case .editClinical:
+            if let patient { ClinicalEditView(patient: patient) }
         }
     }
 
@@ -203,7 +209,7 @@ private struct PatientDetailContent: View {
 
             Section {
                 Picker("Chart section", selection: $tab) {
-                    ForEach(PatientDetailTab.allCases) { tab in
+                    ForEach(PatientDetailTab.allCases.filter { !org.isVolunteerMember || ($0 != .visits && $0 != .tasks) }) { tab in
                         Text(tab.label).tag(tab)
                     }
                 }
@@ -231,7 +237,7 @@ private struct PatientDetailContent: View {
     private func overviewSections(_ patient: Patient, input: PatientInput) -> some View {
         PatientOutcomeSection(patient: patient)
 
-        Section("Clinical") {
+        Section {
             LabeledContent("Code status") {
                 Text(input.codeStatus.label)
                     .fontWeight(.semibold)
@@ -250,6 +256,19 @@ private struct PatientDetailContent: View {
             InfoRow(label: "Next IDG review", value: patient.nextIdgDueDate.map { ISODate.display($0) })
             if let period = patient.startingBenefitPeriod, period > 1 {
                 LabeledContent("Starting benefit period", value: "\(period)")
+            }
+            if canEditClinical(patient) {
+                Button {
+                    care.sheet = .editClinical
+                } label: {
+                    Label("Edit clinical record", systemImage: "pencil")
+                }
+            }
+        } header: {
+            Text("Clinical")
+        } footer: {
+            if canEditClinical(patient) {
+                Text("Edit code status, allergies, medications, contacts, physicians and diagnoses. A code-status change is posted to the care team.")
             }
         }
 
@@ -301,6 +320,8 @@ private struct PatientDetailContent: View {
                     }
                 }
             }
+            // L1: admins, staffing, or an RN/NP/MD on the team can edit it (Features/Members/StaffingViews.swift).
+            CareTeamEditRow(patient: patient)
         }
 
         if let caregiver = input.caregiver, !caregiver.isEmpty {

@@ -35,15 +35,17 @@ final class TriageCallDetailViewModel {
         }
     }
 
+    /// Resolving also resolves the linked alert. `visit` creates a PRN visit (O3).
     @discardableResult
-    func resolve(disposition: TriageDisposition, note: String?, followUpTask: TriageFollowUpTask?) async -> Bool {
+    func resolve(disposition: TriageDisposition, note: String?, followUpTask: TriageFollowUpTask?, visit: TriagePrnVisit? = nil) async -> Bool {
         await perform {
             try await FunctionsClient().resolveTriageCall(
                 orgId: self.orgId,
                 callId: self.callId,
                 disposition: disposition,
                 dispositionNote: note,
-                followUpTask: followUpTask
+                followUpTask: followUpTask,
+                visit: visit
             )
         }
     }
@@ -82,7 +84,13 @@ private struct TriageCallDetailContent: View {
         _model = State(initialValue: TriageCallDetailViewModel(orgId: orgId, callId: callId))
     }
 
-    private var canAct: Bool { org.role.canManageReferrals }
+    /// M3: clinical roles who are the assignee, an alert recipient (checked by the server), or an admin.
+    /// A call with neither an assignee nor an alert is an open queue item.
+    private func canAct(_ call: TriageCall) -> Bool {
+        guard org.role.canManageReferrals else { return false }
+        if org.role == .admin || call.assignedUid == org.uid { return true }
+        return call.alertId != nil || call.assignedUid == nil
+    }
 
     var body: some View {
         Group {
@@ -120,7 +128,16 @@ private struct TriageCallDetailContent: View {
                     }
                     Text(call.reason?.nilIfBlank ?? "No reason recorded")
                         .font(.title3.weight(.semibold))
-                        .textSelection(.enabled)
+                        // L4: no system text selection on PHI; copy goes through SecurePasteboard.
+                        .contextMenu {
+                            if let reason = call.reason?.nilIfBlank {
+                                Button {
+                                    SecurePasteboard.copy(reason)
+                                } label: {
+                                    Label("Copy", systemImage: "doc.on.doc")
+                                }
+                            }
+                        }
                     Text("Received \(RelativeTime.full(call.receivedAt)) by \(org.name(for: call.receivedBy))")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -164,7 +181,7 @@ private struct TriageCallDetailContent: View {
             Section {
                 LabeledContent("Assigned to", value: call.assignedUid.map { org.name(for: $0) } ?? "Unassigned")
                 InfoRow(label: "On-call role", value: call.roleKey)
-                if canAct && call.isOpen {
+                if canAct(call) && call.isOpen {
                     Button {
                         showAssign = true
                     } label: {
@@ -177,7 +194,7 @@ private struct TriageCallDetailContent: View {
             }
 
             if call.isOpen {
-                if canAct {
+                if canAct(call) {
                     Section {
                         Button {
                             showResolve = true
@@ -260,10 +277,15 @@ private struct TriageAssignSheet: View {
     }
 }
 
-private struct TriageResolveSheet: View {
+/// Resolve form for a triage call. Also opened from a triage alert's detail (O3).
+struct TriageResolveSheet: View {
     @Environment(OrgStore.self) private var org
     @Environment(\.dismiss) private var dismiss
     let model: TriageCallDetailViewModel
+    @State private var scheduleVisit = false
+    @State private var visitStart = Date()
+    @State private var visitEnd = Date().addingTimeInterval(3600)
+    @State private var visitAssignee: String?
     @State private var disposition: TriageDisposition = .adviceGiven
     @State private var note = ""
     @State private var createTask = false
@@ -281,8 +303,13 @@ private struct TriageResolveSheet: View {
         )
     }
 
+    private var prnVisit: TriagePrnVisit? {
+        guard scheduleVisit else { return nil }
+        return TriagePrnVisit(start: visitStart, end: visitEnd, assignedUid: visitAssignee)
+    }
+
     private var canSubmit: Bool {
-        !model.isWorking && (!createTask || taskTitle.nilIfBlank != nil)
+        !model.isWorking && (!createTask || taskTitle.nilIfBlank != nil) && (!scheduleVisit || visitEnd > visitStart)
     }
 
     var body: some View {
@@ -318,6 +345,27 @@ private struct TriageResolveSheet: View {
                 } header: {
                     Text("Follow-up")
                 }
+                if model.call?.patientId != nil {
+                    Section {
+                        Toggle("Schedule a PRN visit", isOn: $scheduleVisit)
+                        if scheduleVisit {
+                            DatePicker("Start", selection: $visitStart)
+                            DatePicker("End", selection: $visitEnd, in: visitStart...)
+                            Picker("Clinician", selection: $visitAssignee) {
+                                Text("Me").tag(String?.none)
+                                ForEach(org.activeMembers.filter { $0.memberUid != org.uid && $0.role != .viewer }) { member in
+                                    Text(member.name).tag(String?.some(member.memberUid))
+                                }
+                            }
+                        }
+                    } header: {
+                        Text("Visit")
+                    } footer: {
+                        if scheduleVisit {
+                            Text("A visit that already ended, made by you, is recorded as completed.")
+                        }
+                    }
+                }
             }
             .disabled(model.isWorking)
             .navigationTitle("Resolve call")
@@ -332,7 +380,7 @@ private struct TriageResolveSheet: View {
                     } else {
                         Button("Resolve") {
                             Task {
-                                if await model.resolve(disposition: disposition, note: note.nilIfBlank, followUpTask: followUp) {
+                                if await model.resolve(disposition: disposition, note: note.nilIfBlank, followUpTask: followUp, visit: prnVisit) {
                                     dismiss()
                                 }
                             }

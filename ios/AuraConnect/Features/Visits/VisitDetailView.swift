@@ -7,9 +7,13 @@ final class VisitDetailViewModel {
     let orgId: String
     let visitId: String
     private(set) var visit: Visit?
+    /// The visit's patient (care team for permissions; status for "Record death").
+    private(set) var patient: Patient?
     private(set) var isLoading = true
     var completing: Visit?
     var cancelling: Visit?
+    var rescheduling: Visit?
+    var recordingDeath = false
     var errorMessage: String?
 
     init(orgId: String, visitId: String) {
@@ -28,10 +32,22 @@ final class VisitDetailViewModel {
             errorMessage = error.userMessage
         }
     }
+
+    /// Streams the patient once the visit's patient id is known (restart when it changes).
+    func runPatient(id: String?) async {
+        guard let id = id?.nilIfBlank else { return }
+        do {
+            for try await value in PatientRepository(orgId: orgId).patient(id: id) {
+                patient = value
+            }
+        } catch {
+            // The visit stays usable without the patient; the server re-checks every action.
+        }
+    }
 }
 
 /// One visit with its patient context (address, code status, allergies, caregiver, last note)
-/// and complete / cancel actions.
+/// and complete / reschedule / cancel actions, plus "Record death" for licensed staff (O1).
 struct VisitDetailView: View {
     @Environment(OrgStore.self) private var org
     let visitId: String
@@ -65,6 +81,7 @@ private struct VisitDetailContent: View {
         .navigationTitle("Visit")
         .navigationBarTitleDisplayMode(.inline)
         .task { await model.run() }
+        .task(id: model.visit?.patientId) { await model.runPatient(id: model.visit?.patientId) }
         .sheet(item: $model.completing) { visit in
             CompleteVisitView(visit: visit)
                 .environment(org)
@@ -73,12 +90,28 @@ private struct VisitDetailContent: View {
             CancelVisitView(visit: visit)
                 .environment(org)
         }
+        .sheet(item: $model.rescheduling) { visit in
+            RescheduleVisitView(visit: visit)
+                .environment(org)
+        }
+        .sheet(isPresented: $model.recordingDeath) {
+            if let patient = model.patient {
+                RecordDeathView(patient: patient, visitId: model.visit?.id)
+                    .environment(org)
+            }
+        }
     }
 
-    private func canComplete(_ visit: Visit) -> Bool {
+    private var careTeam: [String]? { model.patient?.careTeamUids }
+
+    /// O1: licensed staff (RN/NP/MD/admin) at a scheduled or in-progress visit of an admitted patient.
+    private func canRecordDeath(_ visit: Visit) -> Bool {
+        guard org.role.canManageCare, org.isLicensed, model.patient?.patientStatus == .admitted else { return false }
         let status = visit.visitStatus
         guard status == .scheduled || status == .missed else { return false }
-        return org.role.canManageCare || visit.assignedUid == org.uid
+        // In progress, or starting within the hour.
+        guard let start = visit.scheduledStart else { return true }
+        return start <= Date().addingTimeInterval(3600)
     }
 
     @ViewBuilder
@@ -95,6 +128,11 @@ private struct VisitDetailContent: View {
                     Text("\(visit.discipline?.label ?? "Visit") · \(visit.assignedUid.map { org.name(for: $0) } ?? "Unassigned")")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    if let type = visit.type?.nilIfBlank, type != "routine" {
+                        Text(type.replacingOccurrences(of: "_", with: " ").capitalized)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 .padding(.vertical, 4)
                 if let patientId = visit.patientId?.nilIfBlank {
@@ -108,9 +146,11 @@ private struct VisitDetailContent: View {
                 Section { ErrorBanner(message: error) }
             }
 
-            let completable = canComplete(visit)
-            let cancellable = org.role.canManageCare && visit.visitStatus == .scheduled
-            if completable || cancellable {
+            let completable = org.canComplete(visit: visit, careTeamUids: careTeam)
+            let reschedulable = org.canReschedule(visit: visit, careTeamUids: careTeam)
+            let cancellable = org.canCancel(visit: visit, careTeamUids: careTeam)
+            let death = canRecordDeath(visit)
+            if completable || reschedulable || cancellable || death {
                 Section {
                     if completable {
                         Button {
@@ -121,6 +161,13 @@ private struct VisitDetailContent: View {
                                 .font(.body.weight(.semibold))
                         }
                     }
+                    if reschedulable {
+                        Button {
+                            model.rescheduling = visit
+                        } label: {
+                            Label("Reschedule", systemImage: "calendar.badge.clock")
+                        }
+                    }
                     if cancellable {
                         Button(role: .destructive) {
                             model.cancelling = visit
@@ -128,16 +175,25 @@ private struct VisitDetailContent: View {
                             Label("Cancel visit", systemImage: "xmark.circle")
                         }
                     }
+                    if death {
+                        Button(role: .destructive) {
+                            model.recordingDeath = true
+                        } label: {
+                            Label("Record death", systemImage: "heart.slash")
+                        }
+                    }
                 } footer: {
                     if visit.visitStatus == .missed {
-                        Text("Missed visits can still be documented as completed (late documentation).")
+                        Text("Missed visits can be rescheduled to a future time or documented as completed (late documentation).")
+                    } else if death {
+                        Text("Recording a death from this visit completes the visit at the time of death.")
                     }
                 }
             }
 
             if let note = visit.note?.nilIfBlank {
                 Section(visit.visitStatus == .completed ? "Visit note" : "Note") {
-                    Text(note).textSelection(.enabled)
+                    Text(note)
                 }
             }
             if visit.visitStatus == .cancelled, let reason = visit.cancelledReason?.nilIfBlank {

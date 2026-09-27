@@ -25,6 +25,7 @@ private struct ChatContent: View {
     @State private var showSummary = false
     @State private var showRecallConfirm = false
     @State private var recallTarget: Message?
+    @State private var coverageReason = ""
 
     init(orgId: String, uid: String, channelId: String) {
         _model = State(initialValue: ChatViewModel(orgId: orgId, channelId: channelId, uid: uid))
@@ -118,9 +119,10 @@ private struct ChatContent: View {
             } message: { _ in
                 Text("The text and attachments are removed for everyone. Recipients see \"Message recalled\".")
             }
-            .task { await model.runChannel() }
-            .task { await model.runMessages() }
-            .task { await model.runReads() }
+            .task(id: model.listenerGeneration) { await model.runChannel() }
+            .task(id: model.listenerGeneration) { await model.runMessages() }
+            .task(id: model.listenerGeneration) { await model.runReads() }
+            .task { await model.runMyOpenAlerts() }
             .onAppear { model.setVisible(scenePhase == .active) }
             .onDisappear { model.setVisible(false) }
             .onChange(of: scenePhase) { _, phase in
@@ -169,7 +171,9 @@ private struct ChatContent: View {
         return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 10) {
-                    if model.channelMissing {
+                    if model.channelMissing, let patient = model.coveragePatient {
+                        coverageJoinCard(patientName: patient.name)
+                    } else if model.channelMissing {
                         ContentUnavailableView("Conversation unavailable",
                                                systemImage: "lock.slash",
                                                description: Text("It may have been removed, or you are no longer a member."))
@@ -191,7 +195,10 @@ private struct ChatContent: View {
                             onOpenAttachment: { attachment in
                                 Task { await model.open(attachment) }
                             },
-                            onOpenThread: { openThread(message) }
+                            onOpenThread: { openThread(message) },
+                            showAcknowledge: model.canAcknowledge(message),
+                            isAcknowledging: model.acknowledgingAlertId != nil && model.acknowledgingAlertId == message.alertId,
+                            onAcknowledge: { Task { await model.acknowledge(message) } }
                         )
                         .contextMenu { messageMenu(message) }
                         .id(message.id ?? "")
@@ -219,6 +226,39 @@ private struct ChatContent: View {
                 }
             }
         }
+    }
+
+    // MARK: O5 on-call coverage
+
+    /// Shown when I open a patient's care-team channel I'm not in. On-call staff on shift (and
+    /// admins) can join until the shift ends; the server checks this and audits the reason.
+    @ViewBuilder
+    private func coverageJoinCard(patientName: String) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Not on the care team", systemImage: "person.crop.circle.badge.questionmark")
+                .font(.headline)
+            Text("You're not a member of the care-team channel for \(patientName). If you're on call now, you can join it for the rest of your shift. The access and your reason are recorded in the audit log, and you're removed when the shift ends.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            TextField("Reason (e.g. after-hours call from family)", text: $coverageReason, axis: .vertical)
+                .lineLimit(1...3)
+                .textFieldStyle(.roundedBorder)
+            Button {
+                Task {
+                    if await model.joinForCoverage(reason: coverageReason) { coverageReason = "" }
+                }
+            } label: {
+                if model.isJoiningCoverage {
+                    ProgressView()
+                } else {
+                    Label("Join for on-call coverage", systemImage: "person.badge.clock")
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(model.isJoiningCoverage || coverageReason.trimmed.count < 3)
+        }
+        .padding()
+        .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14))
     }
 
     // MARK: Message actions
@@ -417,6 +457,10 @@ struct MessageBubble: View {
     let onOpenAttachment: (Attachment) -> Void
     /// When set, parents with replies show a "N replies" chip that calls this.
     var onOpenThread: (() -> Void)? = nil
+    /// O2: urgent/critical message whose open alert targets me.
+    var showAcknowledge: Bool = false
+    var isAcknowledging: Bool = false
+    var onAcknowledge: (() -> Void)? = nil
 
     private var priority: Priority { message.messagePriority }
 
@@ -455,10 +499,10 @@ struct MessageBubble: View {
                             .foregroundStyle(.secondary)
                     }
                     if !message.isRecalled && !message.text.isEmpty {
+                        // L4: no system text selection on PHI; the context menu copies via SecurePasteboard.
                         Text(message.text)
                             .font(.body)
                             .foregroundStyle(Color.primary)
-                            .textSelection(.enabled)
                     }
                     ForEach(visibleFiles, id: \.storagePath) { attachment in
                         Button {
@@ -492,6 +536,21 @@ struct MessageBubble: View {
                     if priority != .normal && !message.isRecalled {
                         RoundedRectangle(cornerRadius: 16).strokeBorder(priority.color, lineWidth: 1.5)
                     }
+                }
+                if showAcknowledge, let onAcknowledge {
+                    Button(action: onAcknowledge) {
+                        if isAcknowledging {
+                            ProgressView()
+                        } else {
+                            Label("Acknowledge", systemImage: "hand.raised.fill")
+                                .font(.caption.weight(.semibold))
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(priority.color)
+                    .controlSize(.small)
+                    .disabled(isAcknowledging)
+                    .accessibilityHint("Acknowledges the alert for this message and stops escalation")
                 }
                 if let onOpenThread, message.replies > 0 {
                     Button(action: onOpenThread) {

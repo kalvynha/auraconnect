@@ -19,14 +19,17 @@ struct MoreView: View {
             }
 
             Section("Care") {
-                NavigationLink(value: Route.myTasks) {
-                    Label("My Tasks", systemImage: "checklist")
-                }
-                NavigationLink(value: Route.myVisits) {
-                    Label("My Visits", systemImage: "calendar.badge.clock")
-                }
-                NavigationLink(value: Route.bereavement) {
-                    Label("Bereavement", systemImage: "heart.circle")
+                // Volunteers cannot read tasks, visits or bereavement plans (firestore.rules).
+                if !org.isVolunteerMember {
+                    NavigationLink(value: Route.myTasks) {
+                        Label("My Tasks", systemImage: "checklist")
+                    }
+                    NavigationLink(value: Route.myVisits) {
+                        Label("My Visits", systemImage: "calendar.badge.clock")
+                    }
+                    NavigationLink(value: Route.bereavement) {
+                        Label("Bereavement", systemImage: "heart.circle")
+                    }
                 }
                 NavigationLink(value: Route.volunteers) {
                     Label("Volunteering", systemImage: "hands.sparkles")
@@ -45,14 +48,17 @@ struct MoreView: View {
                 NavigationLink(value: Route.onCallSchedule) {
                     Label("On-call schedule", systemImage: "calendar")
                 }
-                NavigationLink(value: Route.triage) {
-                    Label("Triage calls", systemImage: "phone.arrow.down.left")
-                }
-                NavigationLink(value: Route.idgMeetings) {
-                    Label("IDG meetings", systemImage: "person.3")
-                }
-                NavigationLink(value: Route.handoff) {
-                    Label("Shift handoff", systemImage: "arrow.left.arrow.right.square")
+                // Volunteers cannot read triage calls or IDG meetings (firestore.rules).
+                if !org.isVolunteerMember {
+                    NavigationLink(value: Route.triage) {
+                        Label("Triage calls", systemImage: "phone.arrow.down.left")
+                    }
+                    NavigationLink(value: Route.idgMeetings) {
+                        Label("IDG meetings", systemImage: "person.3")
+                    }
+                    NavigationLink(value: Route.handoff) {
+                        Label("Shift handoff", systemImage: "arrow.left.arrow.right.square")
+                    }
                 }
             }
 

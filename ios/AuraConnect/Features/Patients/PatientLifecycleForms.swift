@@ -91,6 +91,8 @@ struct RecertifyView: View {
     @State private var didLoad = false
     @State private var isSubmitting = false
     @State private var errorMessage: String?
+    /// Server warnings after a successful save (e.g. F2F outside its window).
+    @State private var warnings: [String] = []
 
     /// Periods that can be certified (period 1 is certified at admission).
     private var periods: [BenefitPeriod] {
@@ -102,19 +104,33 @@ struct RecertifyView: View {
     }
 
     private var isValid: Bool {
-        guard selectedPeriod != nil, physician.nilIfBlank != nil else { return false }
+        guard let period = selectedPeriod, physician.nilIfBlank != nil else { return false }
+        if certificationDateError(for: period) != nil { return false }
+        if period.f2fRequired && f2fBy.nilIfBlank == nil { return false }
         return true
     }
 
-    /// The F2F must fall within the 30 days before the period start, up to the period start.
-    /// Returns a warning when the chosen date is outside that window (the server has the final say).
+    /// S4: the certification must be dated from 15 days before the period starts through its start.
+    private func certificationWindow(for period: BenefitPeriod) -> (from: String, to: String)? {
+        guard let start = ISODate.parse(period.start),
+              let from = Calendar.current.date(byAdding: .day, value: -15, to: start) else { return nil }
+        return (ISODate.string(from: from), period.start)
+    }
+
+    private func certificationDateError(for period: BenefitPeriod) -> String? {
+        guard let window = certificationWindow(for: period) else { return nil }
+        let chosen = ISODate.string(from: certificationDate)
+        guard chosen < window.from || chosen > window.to else { return nil }
+        return "The certification date must be between \(ISODate.display(window.from)) and \(ISODate.display(window.to))."
+    }
+
+    /// Warns when the F2F date is outside the period's window. The recert is still recorded, but the
+    /// F2F milestone stays open (the server has the final say).
     private func f2fWindowWarning(for period: BenefitPeriod) -> String? {
-        guard let periodStart = ISODate.parse(period.start) else { return nil }
-        let calendar = Calendar.current
-        guard let windowStart = calendar.date(byAdding: .day, value: -30, to: periodStart) else { return nil }
-        let chosen = calendar.startOfDay(for: f2fDate)
-        guard chosen < windowStart || chosen > periodStart else { return nil }
-        return "The F2F date is outside the window (\(ISODate.display(ISODate.string(from: windowStart))) – \(ISODate.display(period.start))). It must be within 30 days before the period starts."
+        guard let start = period.f2fWindowStart, let due = period.f2fDueBy else { return nil }
+        let chosen = ISODate.string(from: f2fDate)
+        guard chosen < start || chosen > due else { return nil }
+        return "The F2F date is outside the window (\(ISODate.display(start)) – \(ISODate.display(due))). The recertification will be recorded, but the F2F milestone will stay open."
     }
 
     var body: some View {
@@ -139,6 +155,11 @@ struct RecertifyView: View {
                         TextField("Certifying physician", text: $physician)
                             .textInputAutocapitalization(.words)
                         DatePicker("Certification date", selection: $certificationDate, displayedComponents: .date)
+                        if let period = selectedPeriod, let error = certificationDateError(for: period) {
+                            Label(error, systemImage: "exclamationmark.triangle.fill")
+                                .font(.footnote)
+                                .foregroundStyle(.red)
+                        }
                     } footer: {
                         Text("Completes the recertification milestone for the previous period and creates the recertification checklist.")
                     }
@@ -148,9 +169,9 @@ struct RecertifyView: View {
                             if let warning = f2fWindowWarning(for: period) {
                                 Label(warning, systemImage: "exclamationmark.triangle.fill")
                                     .font(.footnote)
-                                    .foregroundStyle(.red)
+                                    .foregroundStyle(.orange)
                             }
-                            TextField("F2F performed by", text: $f2fBy)
+                            TextField("Performed by (physician or NP, required)", text: $f2fBy)
                                 .textInputAutocapitalization(.words)
                         } header: {
                             Text("Face-to-face encounter")
@@ -178,6 +199,14 @@ struct RecertifyView: View {
                 }
             }
             .onAppear(perform: load)
+            .alert("Recorded with warnings", isPresented: Binding(
+                get: { !warnings.isEmpty },
+                set: { if !$0 { warnings = []; dismiss() } }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(warnings.joined(separator: "\n\n"))
+            }
         }
     }
 
@@ -202,7 +231,7 @@ struct RecertifyView: View {
         errorMessage = nil
         defer { isSubmitting = false }
         do {
-            try await FunctionsClient().recordRecertification(
+            let result = try await FunctionsClient().recordRecertification(
                 orgId: org.orgId,
                 patientId: patientId,
                 periodNumber: period.number,
@@ -211,7 +240,11 @@ struct RecertifyView: View {
                 f2fDate: period.f2fRequired ? ISODate.string(from: f2fDate) : nil,
                 f2fBy: period.f2fRequired ? f2fBy : nil
             )
-            dismiss()
+            if result.isEmpty {
+                dismiss()
+            } else {
+                warnings = result
+            }
         } catch {
             errorMessage = error.userMessage
         }
@@ -251,7 +284,7 @@ struct DischargePatientView: View {
                         .lineLimit(2...6)
                 }
                 Section {
-                    Label("Discharging archives the care team channel and cancels future visits and open tasks.",
+                    Label("Discharging cancels future visits and open tasks. The care team channel is archived after 72 hours.",
                           systemImage: "exclamationmark.triangle")
                         .font(.footnote)
                         .foregroundStyle(.orange)
@@ -312,6 +345,8 @@ struct RecordDeathView: View {
     @Environment(OrgStore.self) private var org
     @Environment(\.dismiss) private var dismiss
     let patient: Patient
+    /// O1: the visit the death is recorded from; it is completed (ending at the time of death).
+    var visitId: String? = nil
 
     @State private var date = Date()
     @State private var includeTime = true
@@ -399,7 +434,13 @@ struct RecordDeathView: View {
                 } header: {
                     Text("Bereavement")
                 } footer: {
-                    Text("Creates a 13-month bereavement plan for the family. Coordinators are social workers, chaplains and members with bereavement access. The care team channel is archived and future visits and open tasks are cancelled.")
+                    Text("Creates a 13-month bereavement plan for the family. Coordinators are social workers, chaplains and members with bereavement access. The care team is notified, future visits and open tasks are cancelled, and the care team channel is archived after 72 hours.")
+                }
+                if visitId != nil {
+                    Section {
+                        Label("This visit will be completed, ending at the time of death.", systemImage: "checkmark.circle")
+                            .font(.footnote)
+                    }
                 }
             }
             .navigationTitle("Record death")
@@ -444,7 +485,8 @@ struct RecordDeathView: View {
                 location: locationText,
                 notes: notes,
                 bereavementRisk: risk,
-                bereavementAssigneeUid: bereavementAssigneeUid
+                bereavementAssigneeUid: bereavementAssigneeUid,
+                visitId: visitId
             )
             dismiss()
         } catch {

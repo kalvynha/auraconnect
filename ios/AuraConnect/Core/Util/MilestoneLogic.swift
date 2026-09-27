@@ -36,12 +36,27 @@ enum MilestoneLogic {
         return .upcoming
     }
 
-    /// Flattens `Milestones` into a list sorted by due date. Benefit periods that ended more than
-    /// `pastPeriodCutoffDays` ago are omitted (they are historical, not actionable).
+    /// v3 (V1) default reminder lead days per kind (mirrors `DEADLINE_LEAD_DAYS_DEFAULTS`).
+    static let defaultLeadDaysByKind: [MilestoneKind: Int] = [
+        .noe: 3, .recert: 15, .f2f: 30, .hopeAdmission: 2, .hopeHuv1: 2, .hopeHuv2: 2,
+    ]
+
+    /// Lead days for `kind`: the org's per-kind setting, else the kind default, else `fallback`.
+    static func leadDays(for kind: MilestoneKind, byKind: [String: Int]?, fallback: Int) -> Int {
+        max(0, byKind?[kind.rawValue] ?? defaultLeadDaysByKind[kind] ?? fallback)
+    }
+
+    /// Flattens `Milestones` into a list sorted by due date.
+    ///
+    /// v3 (S1): overdue milestones are never dropped for age. A benefit period that ended more than
+    /// `pastPeriodCutoffDays` ago is omitted only when all of its milestones are in `completedKeys`
+    /// (server keys `{kind}:{dueDate}`); an unfiled recert or F2F stays visible as overdue.
     static func items(
         for milestones: Milestones,
         today: Date,
         leadDays: Int,
+        leadDaysByKind: [String: Int]? = nil,
+        completedKeys: Set<String> = [],
         pastPeriodCutoffDays: Int = 30,
         calendar: Calendar = .current
     ) -> [MilestoneItem] {
@@ -49,13 +64,14 @@ enum MilestoneLogic {
 
         func add(_ kind: MilestoneKind, _ title: String, due: String?, windowStart: String? = nil, key: String) {
             guard let due = due?.nilIfBlank else { return }
+            let lead = Self.leadDays(for: kind, byKind: leadDaysByKind, fallback: leadDays)
             items.append(MilestoneItem(
                 id: "\(key):\(due)",
                 kind: kind,
                 title: title,
                 dueDate: due,
                 windowStart: windowStart,
-                status: status(dueDate: due, today: today, leadDays: leadDays, calendar: calendar)
+                status: status(dueDate: due, today: today, leadDays: lead, calendar: calendar)
             ))
         }
 
@@ -68,7 +84,9 @@ enum MilestoneLogic {
 
         for period in milestones.benefitPeriods {
             if let days = ISODate.daysFrom(today, to: period.end, calendar: calendar), days < -pastPeriodCutoffDays {
-                continue
+                let recertDone = completedKeys.contains("recert:\(period.end)")
+                let f2fDone = !period.f2fRequired || (period.f2fDueBy.map { completedKeys.contains("f2f:\($0)") } ?? true)
+                if recertDone && f2fDone { continue }
             }
             add(.recert, "Benefit period \(period.number) ends (recert)", due: period.end, key: "recert-\(period.number)")
             if period.f2fRequired {

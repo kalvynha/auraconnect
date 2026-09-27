@@ -447,6 +447,8 @@ struct Patient: Codable, Identifiable {
     // v2 (optional on read; older patients lack them)
     /// Completed milestones keyed by `{kind}:{dueDate}`.
     var milestoneCompletions: [String: MilestoneCompletion]?
+    /// v3 (S5): reopened completions, oldest first.
+    var milestoneHistory: [MilestoneHistoryEntry]?
     /// Planned visit frequency per discipline.
     var visitFrequencies: [VisitFrequency]?
     var lastIdgReviewDate: String?
@@ -455,6 +457,16 @@ struct Patient: Codable, Identifiable {
     var dischargeReason: DischargeReason?
     var death: DeathRecord?
     var bereavementPlanId: String?
+    // v3 intake (optional on read)
+    /// I3: referral metadata carried over by `acceptReferral`.
+    var referralDate: String?
+    var referralSource: String?
+    var reasonForReferral: String?
+    var referralReceivedAt: Date?
+    /// Transfer: start of the current benefit period at the prior hospice.
+    var benefitPeriodStart: String?
+    /// Set by `closeReferralNonAdmit` (status `non_admit`).
+    var nonAdmit: NonAdmitRecord?
     var createdBy: String?
     var createdAt: Date?
     var updatedAt: Date?

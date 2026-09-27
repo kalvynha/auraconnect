@@ -33,6 +33,12 @@ final class SessionStore {
 
     @ObservationIgnored private var authHandle: AuthStateDidChangeListenerHandle?
     @ObservationIgnored private var loadGeneration = 0
+    /// The in-flight local-data wipe, so overlapping requests (sign-out + auth listener) share one.
+    @ObservationIgnored private var clearingTask: Task<Void, Never>?
+
+    /// L3: uid whose data may be in the on-device cache (a uid is not PHI). Persisted so a wipe
+    /// also happens when the app launches with a different user, or none, than last time.
+    private static let cachedUidKey = "session.cachedUid"
 
     var context: OrgContext? {
         if case .ready(let context) = phase { return context }
@@ -53,6 +59,18 @@ final class SessionStore {
 
     private func authChanged(uid newUid: String?) async {
         guard newUid != uid || phase == .loading else { return }
+        // L3: whenever the signed-in uid becomes nil or changes, remove the previous user's cached
+        // data (Firestore offline cache, preview files) before anything else is loaded.
+        let cachedUid = UserDefaults.standard.string(forKey: Self.cachedUidKey) ?? uid
+        if let cachedUid, cachedUid != newUid {
+            phase = .loading
+            await clearLocalData()
+        }
+        if let newUid {
+            UserDefaults.standard.set(newUid, forKey: Self.cachedUidKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.cachedUidKey)
+        }
         let user = Auth.auth().currentUser
         uid = user?.uid
         email = user?.email
@@ -156,6 +174,20 @@ final class SessionStore {
             phase = .failed(error.userMessage)
             return
         }
-        await FirebaseService.clearLocalData()
+        await clearLocalData()
+    }
+
+    /// Wipes on-device PHI once, even when sign-out and the auth listener both ask for it.
+    private func clearLocalData() async {
+        if let clearingTask {
+            await clearingTask.value
+            return
+        }
+        let task = Task { @MainActor in
+            await FirebaseService.clearLocalData()
+        }
+        clearingTask = task
+        await task.value
+        clearingTask = nil
     }
 }

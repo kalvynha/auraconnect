@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import FirebaseFirestore
 
 /// A message the server rejected. Firestore rolls back the local copy, so the content is kept
 /// here to show a "Not sent" bubble with Retry / Delete.
@@ -42,6 +43,15 @@ final class ChatViewModel {
     var errorMessage: String?
     /// Id of the message currently being recalled.
     private(set) var recallingMessageId: String?
+    /// O2: ids of open alerts that target me (the Acknowledge button shows on their messages).
+    private(set) var openAlertIdsForMe: Set<String> = []
+    private(set) var acknowledgingAlertId: String?
+    /// O5: the patient whose care-team channel this is, when I can't read the channel.
+    private(set) var coveragePatient: (id: String, name: String)?
+    private(set) var isJoiningCoverage = false
+    private(set) var coverageUntil: Date?
+    /// Bumped after joining for coverage so the listeners (which failed on permission) restart.
+    private(set) var listenerGeneration = 0
 
     @ObservationIgnored private var isVisible = false
     @ObservationIgnored private var lastMarkedMessageId: String?
@@ -85,9 +95,90 @@ final class ChatViewModel {
             for try await value in channelRepository.channel(id: channelId) {
                 channel = value
                 channelMissing = value == nil
+                if value != nil { coveragePatient = nil }
             }
         } catch {
             channelMissing = channel == nil
+            if channelMissing {
+                // Not a member: offer on-call coverage access if this is a patient care-team channel.
+                await lookUpCoveragePatient()
+                if coveragePatient == nil && !Self.isPermissionDenied(error) { errorMessage = error.userMessage }
+            } else {
+                errorMessage = error.userMessage
+            }
+        }
+    }
+
+    // MARK: O5 on-call coverage
+
+    /// Finds the patient whose care-team channel this is (staff can read patients; the channel
+    /// itself is readable only by members).
+    private func lookUpCoveragePatient() async {
+        do {
+            let snapshot = try await FirebaseService.orgRef(orgId).collection("patients")
+                .whereField("channelId", isEqualTo: channelId)
+                .limit(to: 1)
+                .getDocuments()
+            guard let document = snapshot.documents.first,
+                  let patient = try? document.data(as: Patient.self) else { return }
+            let name = [patient.lastName?.nilIfBlank, patient.firstName?.nilIfBlank].compactMap { $0 }.joined(separator: ", ")
+            coveragePatient = (document.documentID, name.isEmpty ? "this patient" : name)
+        } catch {
+            // Volunteers and others without patient access simply see "unavailable".
+        }
+    }
+
+    /// Joins the care-team channel until the end of my on-call shift. The server checks the shift
+    /// (or admin) and audits the access with `reason`.
+    @discardableResult
+    func joinForCoverage(reason: String) async -> Bool {
+        guard let patient = coveragePatient, !isJoiningCoverage else { return false }
+        isJoiningCoverage = true
+        defer { isJoiningCoverage = false }
+        do {
+            let result = try await FunctionsClient().joinPatientChannelForCoverage(orgId: orgId, patientId: patient.id, reason: reason)
+            coverageUntil = result.until
+            channelMissing = false
+            isLoading = true
+            listenerGeneration += 1
+            return true
+        } catch {
+            errorMessage = error.userMessage
+            return false
+        }
+    }
+
+    // MARK: O2 acknowledge from chat
+
+    /// My open alerts (bounded: open, targeting me); messages whose `alertId` is in the set show Acknowledge.
+    func runMyOpenAlerts() async {
+        let query = FirebaseService.orgRef(orgId).collection("alerts")
+            .whereField("targetUids", arrayContains: uid)
+            .whereField("status", isEqualTo: "open")
+            .limit(to: 100)
+        do {
+            for try await alerts in query.decodedStream(AuraAlert.self) {
+                openAlertIdsForMe = Set(alerts.filter { $0.source?.channelId == channelId }.compactMap { $0.id })
+            }
+        } catch {
+            openAlertIdsForMe = []
+        }
+    }
+
+    func canAcknowledge(_ message: Message) -> Bool {
+        guard let alertId = message.alertId, !message.isRecalled, message.messagePriority != .normal,
+              message.senderUid != uid else { return false }
+        return openAlertIdsForMe.contains(alertId)
+    }
+
+    func acknowledge(_ message: Message) async {
+        guard let alertId = message.alertId, acknowledgingAlertId == nil else { return }
+        acknowledgingAlertId = alertId
+        defer { acknowledgingAlertId = nil }
+        do {
+            try await FunctionsClient().ackAlert(orgId: orgId, alertId: alertId)
+            openAlertIdsForMe.remove(alertId)
+        } catch {
             errorMessage = error.userMessage
         }
     }
@@ -102,8 +193,14 @@ final class ChatViewModel {
             }
         } catch {
             isLoading = false
-            errorMessage = error.userMessage
+            // Not a member: the channel listener handles it (and may offer coverage access).
+            if !Self.isPermissionDenied(error) { errorMessage = error.userMessage }
         }
+    }
+
+    static func isPermissionDenied(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        return nsError.domain == FirestoreErrorDomain && nsError.code == FirestoreErrorCode.permissionDenied.rawValue
     }
 
     func runReads() async {

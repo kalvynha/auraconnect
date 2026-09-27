@@ -96,6 +96,8 @@ enum ChannelType: String, Codable, CaseIterable, Hashable {
 
 enum PatientStatus: String, Codable, CaseIterable, Identifiable, Hashable {
     case referral, admitted, discharged, deceased
+    /// v3: a referral closed without admission (`closeReferralNonAdmit`).
+    case nonAdmit = "non_admit"
 
     var id: String { rawValue }
 
@@ -109,6 +111,7 @@ enum PatientStatus: String, Codable, CaseIterable, Identifiable, Hashable {
         case .admitted: return "Admitted"
         case .discharged: return "Discharged"
         case .deceased: return "Deceased"
+        case .nonAdmit: return "Non-admit"
         }
     }
 }
@@ -165,6 +168,8 @@ enum ReferralStatus: String, Codable, CaseIterable, Identifiable, Hashable {
     case accepted
     case rejected
     case failed
+    /// v3: closed without admission (`closeReferralNonAdmit`).
+    case nonAdmit = "non_admit"
 
     var id: String { rawValue }
 
@@ -180,6 +185,7 @@ enum ReferralStatus: String, Codable, CaseIterable, Identifiable, Hashable {
         case .accepted: return "Accepted"
         case .rejected: return "Rejected"
         case .failed: return "Failed"
+        case .nonAdmit: return "Non-admit"
         }
     }
 
@@ -187,7 +193,8 @@ enum ReferralStatus: String, Codable, CaseIterable, Identifiable, Hashable {
 }
 
 enum ReferralSource: String, Codable, CaseIterable, Hashable {
-    case scan, upload, fax
+    /// v3: `phone` = entered by hand with `createManualReferral` (no file).
+    case scan, upload, fax, phone
 
     init(from decoder: Decoder) throws {
         self = decodeTolerantEnum(decoder, fallback: .upload)
