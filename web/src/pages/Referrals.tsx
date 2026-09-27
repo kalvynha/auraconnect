@@ -1,6 +1,6 @@
-import { useMemo, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { doc, limit, orderBy, query, serverTimestamp, setDoc } from 'firebase/firestore';
+import { doc, limit, orderBy, query, serverTimestamp, setDoc, where } from 'firebase/firestore';
 import { ref as storageRef, uploadBytes } from 'firebase/storage';
 import type { Referral, ReferralStatus } from '@shared/types';
 import { useOrgSession } from '../lib/session';
@@ -13,6 +13,8 @@ import { patientName } from '../lib/patient';
 import { Badge, Button, Card, ErrorBanner, Page, Table } from '../components/ui';
 
 const MAX_BYTES = 25 * 1024 * 1024;
+const ACTIVE_STATUSES: ReferralStatus[] = ['uploaded', 'extracting', 'needs_review', 'failed'];
+const HISTORY_LIMIT = 200;
 const ACCEPT = 'application/pdf,image/*';
 
 function safeFileName(name: string): string {
@@ -29,22 +31,22 @@ export default function ReferralsPage() {
   const [error, setError] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
+  // The active queue is filtered on the server so it is never cut off by the newest-200 limit
+  // (index: referrals(status, createdAt desc)). Other tabs show the newest 200 of that status.
   const referrals = useLiveQuery<Referral>(
-    query(orgCol(s.orgId, 'referrals'), orderBy('createdAt', 'desc'), limit(200)),
-    [s.orgId],
+    query(
+      orgCol(s.orgId, 'referrals'),
+      ...(status === 'active'
+        ? [where('status', 'in', ACTIVE_STATUSES)]
+        : status === 'all'
+          ? []
+          : [where('status', '==', status)]),
+      orderBy('createdAt', 'desc'),
+      ...(status === 'active' ? [] : [limit(HISTORY_LIMIT)]),
+    ),
+    [s.orgId, status],
   );
-
-  const rows = useMemo(
-    () =>
-      referrals.data.filter((r) =>
-        status === 'all'
-          ? true
-          : status === 'active'
-            ? ['uploaded', 'extracting', 'needs_review', 'failed'].includes(r.status)
-            : r.status === status,
-      ),
-    [referrals.data, status],
-  );
+  const rows = referrals.data;
 
   async function upload(files: FileList | null) {
     if (!files || files.length === 0) return;
@@ -87,15 +89,6 @@ export default function ReferralsPage() {
     }
   }
 
-  const counts = useMemo(() => {
-    const c: Record<string, number> = { all: referrals.data.length, active: 0 };
-    for (const r of referrals.data) {
-      c[r.status] = (c[r.status] ?? 0) + 1;
-      if (['uploaded', 'extracting', 'needs_review', 'failed'].includes(r.status)) c.active++;
-    }
-    return c;
-  }, [referrals.data]);
-
   return (
     <Page
       title="Referrals"
@@ -130,7 +123,10 @@ export default function ReferralsPage() {
         <div className="segmented">
           {(['active', ...REFERRAL_STATUSES, 'all'] as const).map((st) => (
             <button key={st} className={status === st ? 'active' : ''} onClick={() => setStatus(st)}>
-              {st.replace('_', ' ')} <span className="count">{counts[st] ?? 0}</span>
+              {st.replace('_', ' ')}
+              {status === st && !referrals.loading && (
+                <span className="count">{st !== 'active' && rows.length >= HISTORY_LIMIT ? `${HISTORY_LIMIT}+` : rows.length}</span>
+              )}
             </button>
           ))}
         </div>

@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent } from 'react';
+import { useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { limit, orderBy, query, where } from 'firebase/firestore';
 import type {
@@ -19,8 +19,11 @@ import { call } from '../lib/firebase';
 import { PRIORITIES } from '../lib/constants';
 import { errorMessage, formatDate, formatInstant } from '../lib/format';
 import { MILESTONE_LABELS } from '../lib/milestones';
+import { csvFileName, downloadCsv, toCsv } from '../lib/csv';
 import { patientName } from '../lib/patient';
 import { Badge, Button, Card, ErrorBanner, Field, MemberPicker, Modal, Page } from '../components/ui';
+
+const PAGE_LIMIT = 200;
 
 function NewAlertModal({ onClose }: { onClose: () => void }) {
   const s = useOrgSession();
@@ -203,24 +206,51 @@ export default function AlertsPage() {
   const [scope, setScope] = useState<'mine' | 'all'>(s.isAdmin ? 'all' : 'mine');
   const [creating, setCreating] = useState(false);
 
+  // Server-side status filter: with 100s of resolved alerts, "limit then filter" hid open ones.
   const alerts = useLiveQuery<Alert>(
-    scope === 'all' && s.isAdmin
-      ? query(orgCol(s.orgId, 'alerts'), orderBy('createdAt', 'desc'), limit(200))
-      : query(
-          orgCol(s.orgId, 'alerts'),
-          where('targetUids', 'array-contains', s.user.uid),
-          orderBy('createdAt', 'desc'),
-          limit(200),
-        ),
-    [s.orgId, s.user.uid, scope, s.isAdmin],
+    query(
+      orgCol(s.orgId, 'alerts'),
+      ...(scope === 'all' && s.isAdmin ? [] : [where('targetUids', 'array-contains', s.user.uid)]),
+      ...(status === 'all' ? [] : [where('status', '==', status)]),
+      orderBy('createdAt', 'desc'),
+      limit(PAGE_LIMIT),
+    ),
+    [s.orgId, s.user.uid, scope, s.isAdmin, status],
   );
+  const rows = alerts.data;
 
-  const rows = useMemo(() => alerts.data.filter((a) => status === 'all' || a.status === status), [alerts.data, status]);
-  const counts = useMemo(() => {
-    const c: Record<string, number> = { all: alerts.data.length };
-    for (const a of alerts.data) c[a.status] = (c[a.status] ?? 0) + 1;
-    return c;
-  }, [alerts.data]);
+  function exportAlerts() {
+    const src = (a: Alert): string => {
+      const x = a.source;
+      switch (x.type) {
+        case 'deadline':
+          return `deadline: ${MILESTONE_LABELS[x.milestone] ?? x.milestone} due ${x.dueDate}`;
+        case 'message':
+          return 'message';
+        case 'triage':
+          return 'triage call';
+        case 'visit_missed':
+          return 'missed visit';
+        default:
+          return 'manual';
+      }
+    };
+    const csv = toCsv(rows, [
+      { header: 'Created', value: (a) => formatInstant(a.createdAt) },
+      { header: 'Priority', value: (a) => a.priority },
+      { header: 'Status', value: (a) => a.status },
+      { header: 'Title', value: (a) => a.title },
+      { header: 'Source', value: src },
+      { header: 'Patient ID', value: (a) => ('patientId' in a.source ? a.source.patientId ?? '' : '') },
+      { header: 'Created by', value: (a) => (a.createdBy === 'system' ? 'system' : s.memberName(a.createdBy)) },
+      { header: 'Level', value: (a) => a.level },
+      { header: 'Exhausted', value: (a) => (a.exhausted ? 'yes' : 'no') },
+      { header: 'Notifying', value: (a) => a.currentTargetUids.map((u) => s.memberName(u)).join('; ') },
+      { header: 'Acked by', value: (a) => (a.ackedBy ? s.memberName(a.ackedBy) : '') },
+      { header: 'Acked at', value: (a) => (a.ackedAt ? formatInstant(a.ackedAt) : '') },
+    ]);
+    downloadCsv(csvFileName(`alerts-${status}`), csv);
+  }
 
   return (
     <Page
@@ -232,7 +262,10 @@ export default function AlertsPage() {
         <div className="segmented">
           {(['open', 'acked', 'resolved', 'all'] as const).map((st) => (
             <button key={st} className={status === st ? 'active' : ''} onClick={() => setStatus(st)}>
-              {st} <span className="count">{counts[st] ?? 0}</span>
+              {st}
+              {status === st && !alerts.loading && (
+                <span className="count">{rows.length >= PAGE_LIMIT ? `${PAGE_LIMIT}+` : rows.length}</span>
+              )}
             </button>
           ))}
         </div>
@@ -249,9 +282,19 @@ export default function AlertsPage() {
         ) : rows.length === 0 ? (
           <p className="muted">No {status === 'all' ? '' : status} alerts.</p>
         ) : (
-          <div className="alert-list">
-            {rows.map((a) => <AlertCard key={a.id} a={a} />)}
-          </div>
+          <>
+            <div className="table-tools no-print">
+              <span className="muted small">
+                {rows.length} alert{rows.length === 1 ? '' : 's'}
+                {rows.length >= PAGE_LIMIT ? ` (newest ${PAGE_LIMIT})` : ''}
+              </span>
+              <Button small variant="ghost" onClick={() => exportAlerts()}>Export CSV</Button>
+              <Button small variant="ghost" onClick={() => window.print()}>Print</Button>
+            </div>
+            <div className="alert-list">
+              {rows.map((a) => <AlertCard key={a.id} a={a} />)}
+            </div>
+          </>
         )}
       </Card>
       {creating && <NewAlertModal onClose={() => setCreating(false)} />}

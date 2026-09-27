@@ -186,11 +186,13 @@ export function TaskTable({
   showPatient = true,
   onEdit,
   empty = 'No tasks.',
+  exportName,
 }: {
   rows: WithId<Task>[];
   showPatient?: boolean;
   onEdit: (t: WithId<Task>) => void;
   empty?: string;
+  exportName?: string;
 }) {
   const s = useOrgSession();
   const canEdit = s.role !== 'viewer';
@@ -200,9 +202,11 @@ export function TaskTable({
       rowKey={(t) => t.id}
       empty={empty}
       rowClassName={(t) => (t.status !== 'open' ? 'row-muted' : undefined)}
+      exportName={exportName}
       columns={[
         {
           header: 'Task',
+          csv: (t) => (t.description ? `${t.title} — ${t.description}` : t.title),
           cell: (t) => (
             <>
               <strong>{t.title}</strong>
@@ -211,13 +215,13 @@ export function TaskTable({
           ),
         },
         ...(showPatient
-          ? [{ header: 'Patient', cell: (t: WithId<Task>) => (t.patientId ? <Link to={`/patients/${t.patientId}`}>{t.patientName ?? 'Patient'}</Link> : <span className="muted">—</span>) }]
+          ? [{ header: 'Patient', csv: (t: WithId<Task>) => t.patientName ?? '', cell: (t: WithId<Task>) => (t.patientId ? <Link to={`/patients/${t.patientId}`}>{t.patientName ?? 'Patient'}</Link> : <span className="muted">—</span>) }]
           : []),
-        { header: 'Assignee', cell: (t) => (t.assigneeUid ? s.memberName(t.assigneeUid) : <span className="muted">Unassigned{t.discipline ? ` · ${t.discipline}` : ''}</span>) },
-        { header: 'Due', cell: (t) => <TaskDue task={t} /> },
-        { header: 'Priority', cell: (t) => (t.priority !== 'normal' ? <Badge value={t.priority} /> : <span className="muted">normal</span>) },
-        { header: 'Status', cell: (t) => <Badge value={t.status} tone={t.status === 'open' ? 'info' : undefined} /> },
-        { header: 'Source', cell: (t) => <span className="muted small">{sourceLabel(t)}</span> },
+        { header: 'Assignee', csv: (t) => (t.assigneeUid ? s.memberName(t.assigneeUid) : `Unassigned${t.discipline ? ` (${t.discipline})` : ''}`), cell: (t) => (t.assigneeUid ? s.memberName(t.assigneeUid) : <span className="muted">Unassigned{t.discipline ? ` · ${t.discipline}` : ''}</span>) },
+        { header: 'Due', csv: (t) => t.dueDate ?? '', cell: (t) => <TaskDue task={t} /> },
+        { header: 'Priority', csv: (t) => t.priority, cell: (t) => (t.priority !== 'normal' ? <Badge value={t.priority} /> : <span className="muted">normal</span>) },
+        { header: 'Status', csv: (t) => t.status, cell: (t) => <Badge value={t.status} tone={t.status === 'open' ? 'info' : undefined} /> },
+        { header: 'Source', csv: (t) => sourceLabel(t), cell: (t) => <span className="muted small">{sourceLabel(t)}</span> },
         {
           header: '',
           className: 'actions',

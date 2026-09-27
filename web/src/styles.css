@@ -378,3 +378,35 @@ div.stat:hover { border-color: var(--border); }
   .page { padding: 16px; }
   .channel-list { width: 220px; }
 }
+
+/* Table tools (CSV export / print) */
+.table-tools { display: flex; justify-content: flex-end; align-items: center; gap: 6px; margin-bottom: 6px; }
+.table-tools .muted { margin-right: auto; }
+.filters-grid { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin-bottom: 12px; }
+.coverage-gaps ul { margin: 4px 0 0; padding-left: 18px; }
+.cap-list { display: flex; flex-wrap: wrap; gap: 4px; }
+
+/* Print: content only, black on white, tables fully expanded. */
+@media print {
+  :root {
+    --bg: #fff; --surface: #fff; --surface-2: #fff; --text: #000; --muted: #333; --border: #999; --shadow: none;
+  }
+  html, body, #root { height: auto; background: #fff !important; color: #000 !important; }
+  .sidebar, nav, .btn, .icon-btn, .link, .modal-backdrop, .modal, .no-print, .page-actions, .toolbar, .filters-grid, .tabs,
+  .segmented, .dropzone, .table-tools, .add-shift, details > summary { display: none !important; }
+  select { border: none !important; appearance: none; -webkit-appearance: none; background: none !important; padding: 0 !important; }
+  details:not([open]) > *:not(summary) { display: block !important; }
+  .shell { display: block; }
+  .main, .page { padding: 0; margin: 0; max-width: none; width: 100%; }
+  .card, .stat { box-shadow: none; border: 1px solid #999; break-inside: avoid; }
+  .table-wrap { overflow: visible !important; }
+  .table { width: 100%; font-size: 11px; }
+  .table th, .table td { color: #000 !important; background: #fff !important; border-bottom: 1px solid #999; white-space: normal; }
+  .table thead { display: table-header-group; }
+  .table tr { break-inside: avoid; }
+  .badge { border: 1px solid #666 !important; background: #fff !important; color: #000 !important; }
+  .banner { border: 1px solid #666 !important; background: #fff !important; color: #000 !important; }
+  a { color: #000 !important; text-decoration: none; }
+  .stat-value, .stat-danger { color: #000 !important; }
+  .clamp { -webkit-line-clamp: unset !important; display: block !important; overflow: visible !important; }
+}

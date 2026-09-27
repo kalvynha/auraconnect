@@ -1,6 +1,8 @@
 // Runtime mirrors of the constants in @shared/types (which we may only import as types).
 import type {
   AlertStatus,
+  AuditAction,
+  Capability,
   BereavementContactStatus,
   DischargeReason,
   DocumentCategory,
@@ -154,4 +156,33 @@ export const DOCUMENT_CATEGORY_LABELS: Record<DocumentCategory, string> = {
 
 export const VOLUNTEER_ACTIVITIES: readonly VolunteerActivity[] = [
   'companionship', 'respite', 'vigil', 'errands', 'bereavement', 'admin', 'other',
+];
+
+// ---------------------------------------------------------------------------
+// v3
+// ---------------------------------------------------------------------------
+
+/** Mirror of CAPABILITIES in @shared/types. */
+export const CAPABILITIES: readonly Capability[] = ['reports', 'audit', 'staffing', 'scheduling', 'volunteers', 'bereavement'];
+export const CAPABILITY_LABELS: Record<Capability, string> = {
+  reports: 'Reports: dashboards, metrics, compliance reports, exports',
+  audit: 'Audit: read the audit log',
+  staffing: 'Staffing: edit care teams, reassign visits/tasks, offboarding',
+  scheduling: 'Scheduling: schedule/reassign any visit, visit plans, shifts',
+  volunteers: 'Volunteers: manage assignments and logs for volunteers',
+  bereavement: 'Bereavement: manage all plans and mailings',
+};
+
+/** Mirror of the AuditAction union in @shared/types (for the audit-log filter). */
+export const AUDIT_ACTIONS: readonly AuditAction[] = [
+  'org.create', 'member.invite', 'member.join', 'channel.create', 'channel.members.update',
+  'patient.admit', 'patient.update', 'referral.extract', 'referral.accept', 'referral.reject',
+  'alert.create', 'alert.ack', 'alert.resolve', 'alert.escalate',
+  'milestone.complete', 'milestone.reopen', 'patient.level_of_care', 'patient.recertify', 'patient.discharge', 'patient.death',
+  'visit.schedule', 'visit.update', 'visit.complete', 'visit.cancel', 'visit.missed',
+  'task.create', 'task.update', 'task.complete', 'bereavement.update',
+  'idg.create', 'idg.update', 'idg.complete', 'idg.ai_prep',
+  'triage.log', 'triage.assign', 'triage.resolve', 'document.upload',
+  'message.recall', 'message.search', 'broadcast.send', 'ai.summarize_channel', 'ai.handoff',
+  'volunteer.assign', 'volunteer.log',
 ];

@@ -82,9 +82,11 @@ export function MilestonesTab({ patient }: { patient: WithId<Patient> }) {
         <Table
           rows={rows}
           rowKey={(d) => milestoneKey(d)}
+          exportName="milestones"
           columns={[
             {
               header: 'Milestone',
+              csv: (d) => `${d.label} (${milestoneKey(d)})`,
               cell: (d) => (
                 <>
                   <strong>{d.label}</strong>
@@ -94,6 +96,7 @@ export function MilestonesTab({ patient }: { patient: WithId<Patient> }) {
             },
             {
               header: 'Due',
+              csv: (d) => (d.windowStart ? `${d.windowStart} to ${d.due}` : d.due),
               cell: (d) => (
                 <>
                   {formatDate(d.due)}
@@ -103,6 +106,11 @@ export function MilestonesTab({ patient }: { patient: WithId<Patient> }) {
             },
             {
               header: 'Status',
+              csv: (d) => {
+                const c = patient.milestoneCompletions?.[milestoneKey(d)];
+                const st = statusOf(patient, d).label;
+                return c ? `${st} — ${s.memberName(c.completedBy)} ${formatInstant(c.completedAt)}${c.note ? ` — ${c.note}` : ''}` : st;
+              },
               cell: (d) => {
                 const st = statusOf(patient, d);
                 const c = patient.milestoneCompletions?.[milestoneKey(d)];

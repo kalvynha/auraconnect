@@ -17,7 +17,7 @@ import { usePatients } from '../lib/queries';
 import { call } from '../lib/firebase';
 import { DEFAULT_TASK_TEMPLATES, DISCIPLINES, PRIORITIES, TASK_STATUSES, TASK_TEMPLATE_EVENTS } from '../lib/constants';
 import { addDaysISO, daysBetween, todayISO } from '../lib/format';
-import { Badge, Button, Card, ErrorBanner, Field, Page, PatientSelect, Tabs, type TabDef } from '../components/ui';
+import { Badge, Button, Card, ErrorBanner, Field, MemberSelect, Page, PatientSelect, Tabs, type TabDef } from '../components/ui';
 import { TaskEditorModal, TaskTable } from '../components/tasks';
 
 type View = 'mine' | 'unassigned' | 'all' | 'templates';
@@ -153,22 +153,45 @@ export default function TasksPage() {
   const [status, setStatus] = useState<TaskStatus | 'all'>('open');
   const [patientId, setPatientId] = useState('');
   const [due, setDue] = useState<DueFilter>('any');
+  const [assignee, setAssignee] = useState('');
   const [editing, setEditing] = useState<WithId<Task> | 'new' | null>(null);
   const patients = usePatients(s.orgId);
   const myDiscipline = s.member?.discipline ?? null;
 
-  const q =
-    view === 'mine'
-      ? query(orgCol(s.orgId, 'tasks'), where('assigneeUid', '==', s.user.uid))
-      : view === 'unassigned'
-        ? query(orgCol(s.orgId, 'tasks'), where('assigneeUid', '==', null))
-        : view === 'all'
-          ? query(orgCol(s.orgId, 'tasks'), orderBy('createdAt', 'desc'), limit(500))
-          : null;
-  const tasks = useLiveQuery<Task>(q, [s.orgId, s.user.uid, view]);
+  const today = todayISO();
+  const assigneeFilter = view === 'all' ? assignee : '';
+  // Open tasks are filtered on the server (status == open, ordered by due date) so the
+  // backlog of done/cancelled tasks never pushes open ones past a limit. Overdue adds
+  // dueDate < today. Indexes: tasks(status, dueDate), tasks(assigneeUid, status, dueDate).
+  const q = useMemo(() => {
+    if (view === 'templates') return null;
+    const col = orgCol(s.orgId, 'tasks');
+    const who =
+      view === 'mine'
+        ? [where('assigneeUid', '==', s.user.uid)]
+        : view === 'unassigned'
+          ? [where('assigneeUid', '==', null)]
+          : assigneeFilter
+            ? [where('assigneeUid', '==', assigneeFilter)]
+            : [];
+    if (status === 'open') {
+      return query(
+        col,
+        ...who,
+        where('status', '==', 'open'),
+        ...(due === 'overdue' ? [where('dueDate', '<', today)] : []),
+        orderBy('dueDate'),
+        limit(1000),
+      );
+    }
+    // History views (done / cancelled / all): per-person queries are naturally bounded;
+    // the org-wide one shows the newest 500.
+    if (who.length) return query(col, ...who);
+    return query(col, orderBy('createdAt', 'desc'), limit(500));
+  }, [s.orgId, s.user.uid, view, status, due, today, assigneeFilter]);
+  const tasks = useLiveQuery<Task>(q, [s.orgId, s.user.uid, view, status, due, today, assigneeFilter]);
 
   const rows = useMemo(() => {
-    const today = todayISO();
     const weekEnd = addDaysISO(today, 7);
     return tasks.data
       .filter((t) => {
@@ -189,7 +212,7 @@ export default function TasksPage() {
         }
       })
       .sort((a, b) => (a.dueDate ?? '9999').localeCompare(b.dueDate ?? '9999'));
-  }, [tasks.data, view, status, patientId, due, myDiscipline, s.isAdmin]);
+  }, [tasks.data, view, status, patientId, due, myDiscipline, s.isAdmin, today]);
 
   const tabs: TabDef<View>[] = [
     { key: 'mine', label: 'My tasks' },
@@ -214,10 +237,15 @@ export default function TasksPage() {
             <Field label="Patient" className="field-inline">
               <PatientSelect patients={patients.data} value={patientId} onChange={setPatientId} placeholder="All patients" />
             </Field>
+            {view === 'all' && (
+              <Field label="Assignee" className="field-inline">
+                <MemberSelect members={s.members} value={assignee} onChange={setAssignee} placeholder="Anyone" />
+              </Field>
+            )}
             <Field label="Due" className="field-inline">
               <select value={due} onChange={(e) => setDue(e.target.value as DueFilter)}>
                 <option value="any">Any time</option>
-                <option value="overdue">Overdue</option>
+                <option value="overdue">All overdue</option>
                 <option value="today">Due today</option>
                 <option value="week">Next 7 days</option>
                 <option value="none">No due date</option>
@@ -226,7 +254,7 @@ export default function TasksPage() {
           </div>
           <Card>
             <ErrorBanner error={tasks.error} />
-            <TaskTable rows={rows} onEdit={setEditing} empty={tasks.loading ? 'Loading…' : 'No tasks match.'} />
+            <TaskTable rows={rows} onEdit={setEditing} exportName={`tasks-${view}-${status}`} empty={tasks.loading ? 'Loading…' : 'No tasks match.'} />
             {view === 'unassigned' && (
               <p className="muted small">Use “Take” to assign a task to yourself.</p>
             )}

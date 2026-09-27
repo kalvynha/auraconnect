@@ -137,11 +137,17 @@ function PlanCard({ plan, canEdit }: { plan: WithId<BereavementPlan>; canEdit: b
         rows={contacts}
         rowKey={(c) => c.id}
         rowClassName={(c) => (contactState(c, today) === 'overdue' ? 'row-missed' : c.status !== 'pending' ? 'row-muted' : undefined)}
+        exportName="bereavement-plan"
         columns={[
-          { header: 'Due', cell: (c) => formatDate(c.dueDate) },
+          { header: 'Due', csv: (c) => c.dueDate, cell: (c) => formatDate(c.dueDate) },
           { header: 'Contact', cell: (c) => <><strong>{c.label}</strong> <span className="muted small">{c.type}</span></> },
           {
             header: 'Status',
+            csv: (c) => {
+              const st = contactState(c, today);
+              const label = st === 'overdue' ? 'overdue' : c.status;
+              return [label, c.completedAt ? `${s.memberName(c.completedBy)} ${formatInstant(c.completedAt)}` : '', c.note ?? ''].filter(Boolean).join(' — ');
+            },
             cell: (c) => {
               const st = contactState(c, today);
               return (
@@ -235,8 +241,9 @@ export default function BereavementPage() {
           rowKey={(r) => `${r.plan.id}:${r.contact.id}`}
           empty="Nothing due in the next 7 days."
           rowClassName={(r) => (r.overdue ? 'row-missed' : undefined)}
+          exportName="bereavement-due"
           columns={[
-            { header: 'Due', cell: (r) => <>{formatDate(r.contact.dueDate)} {r.overdue && <Badge tone="danger">overdue</Badge>}</> },
+            { header: 'Due', csv: (r) => `${r.contact.dueDate}${r.overdue ? ' (overdue)' : ''}`, cell: (r) => <>{formatDate(r.contact.dueDate)} {r.overdue && <Badge tone="danger">overdue</Badge>}</> },
             { header: 'Family of', cell: (r) => r.plan.patientName },
             { header: 'Contact', cell: (r) => `${r.contact.label} (${r.contact.type})` },
             { header: 'Primary contact', cell: (r) => r.plan.primaryContact ? [r.plan.primaryContact.name, r.plan.primaryContact.phone].filter(Boolean).join(' · ') : '—' },

@@ -4,10 +4,75 @@ import type { OnCallRole, Org } from '@shared/types';
 import { useOrgSession } from '../lib/session';
 import { orgCol, orgDoc } from '../lib/firestore';
 import { useAction, useLiveQuery } from '../lib/hooks';
-import { ORG_SETTING_DEFAULTS, orgSettings } from '../lib/constants';
+import { ORG_SETTING_DEFAULTS, TIMEZONES, orgSettings } from '../lib/constants';
 import { Button, Card, ErrorBanner, Field, Page } from '../components/ui';
 
 type SettingsPatch = Partial<Pick<Org, 'triageRoleKey' | 'idgCadenceDays' | 'missedVisitGraceMinutes' | 'messageLifespanDays'>>;
+type OrgPatch = Partial<Pick<Org, 'name' | 'timezone' | 'deadlineLeadDays'>>;
+
+/**
+ * Organization name, time zone and deadline lead time. firestore.rules (orgs/{orgId} update, admin)
+ * require: name non-empty string ≤ 200, timezone non-empty string ≤ 64, deadlineLeadDays int 0–90.
+ */
+function OrgSettingsCard() {
+  const s = useOrgSession();
+  const act = useAction();
+  const [name, setName] = useState(s.org?.name ?? '');
+  const [timezone, setTimezone] = useState(s.org?.timezone ?? '');
+  const [leadDays, setLeadDays] = useState(String(s.org?.deadlineLeadDays ?? 7));
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    setName(s.org?.name ?? '');
+    setTimezone(s.org?.timezone ?? '');
+    setLeadDays(String(s.org?.deadlineLeadDays ?? 7));
+  }, [s.org?.name, s.org?.timezone, s.org?.deadlineLeadDays]);
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    setSaved(false);
+    const n = name.trim();
+    const lead = Number(leadDays);
+    if (!n || n.length > 200) return act.setError('Organization name is required (up to 200 characters).');
+    if (!timezone || timezone.length > 64) return act.setError('Choose a time zone.');
+    if (!Number.isInteger(lead) || lead < 0 || lead > 90) return act.setError('Deadline lead time must be a whole number of days from 0 to 90.');
+    const patch: OrgPatch = {};
+    if (n !== s.org?.name) patch.name = n;
+    if (timezone !== s.org?.timezone) {
+      if (!window.confirm(`Change the organization time zone to ${timezone}? Deadline checks, nightly metrics and "today" on the server will use it.`)) return;
+      patch.timezone = timezone;
+    }
+    if (lead !== s.org?.deadlineLeadDays) patch.deadlineLeadDays = lead;
+    if (Object.keys(patch).length === 0) return setSaved(true);
+    if (await act.run(() => updateDoc(orgDoc(s.orgId), patch))) setSaved(true);
+  }
+
+  const tzOptions = timezone && !TIMEZONES.includes(timezone) ? [timezone, ...TIMEZONES] : TIMEZONES;
+
+  return (
+    <Card title="Organization">
+      <form className="form form-narrow" onSubmit={submit}>
+        <ErrorBanner error={act.error} />
+        {saved && <div className="banner banner-ok">Organization settings saved.</div>}
+        <Field label="Organization name">
+          <input required maxLength={200} value={name} onChange={(e) => setName(e.target.value)} />
+        </Field>
+        <Field label="Time zone" hint="Used for deadline checks, missed visits and nightly metrics.">
+          <select required value={timezone} onChange={(e) => setTimezone(e.target.value)}>
+            <option value="" disabled>Select time zone…</option>
+            {tzOptions.map((tz) => <option key={tz} value={tz}>{tz}</option>)}
+          </select>
+        </Field>
+        <Field label="Deadline reminder lead time (days)" hint="0–90. Reminder alerts are raised this many days before an NOE, recert, F2F or HOPE deadline.">
+          <input type="number" min={0} max={90} step={1} required value={leadDays} onChange={(e) => setLeadDays(e.target.value)} />
+        </Field>
+        <div>
+          <Button type="submit" variant="primary" busy={act.busy}>Save organization</Button>
+        </div>
+      </form>
+    </Card>
+  );
+}
 
 export default function SettingsPage() {
   const s = useOrgSession();
@@ -57,6 +122,7 @@ export default function SettingsPage() {
 
   return (
     <Page title="Settings">
+      <OrgSettingsCard />
       <Card title="Care coordination settings">
         <form className="form form-narrow" onSubmit={submit}>
           <ErrorBanner error={act.error ?? roles.error} />

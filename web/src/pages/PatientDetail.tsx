@@ -7,7 +7,7 @@ import { orgCol, orgDoc, type WithId } from '../lib/firestore';
 import { useLiveDoc, useLiveQuery } from '../lib/hooks';
 import { CLINICAL_ROLES, DISCHARGE_REASON_LABELS, INTAKE_ROLES, LEVEL_OF_CARE_LABELS } from '../lib/constants';
 import { dueState, formatDate, formatInstant } from '../lib/format';
-import { currentBenefitPeriodNumber, deadlinesWithin, milestoneKey } from '../lib/milestones';
+import { currentBenefitPeriodNumber, milestoneKey, openDeadlines } from '../lib/milestones';
 import { patientName } from '../lib/patient';
 import { Badge, Button, Card, ErrorBanner, Loading, Page, Table, Tabs, Timeline, type TabDef } from '../components/ui';
 import { TaskEditorModal, TaskTable } from '../components/tasks';
@@ -52,7 +52,8 @@ function OverviewTab({ p }: { p: WithId<Patient> }) {
   const addr = [p.address.line1, p.address.line2, [p.address.city, p.address.state].filter(Boolean).join(', '), p.address.zip]
     .filter(Boolean)
     .join(' · ');
-  const openDeadlines = deadlinesWithin(p.milestones, -60, 14).filter((d) => !p.milestoneCompletions?.[milestoneKey(d)]);
+  // Every overdue deadline (no look-back cap) plus those due in the next 14 days.
+  const openDl = openDeadlines(p).filter((d) => d.overdue || d.diff <= 14);
   return (
     <>
       {(p.status === 'discharged' || p.status === 'deceased') && (
@@ -96,16 +97,16 @@ function OverviewTab({ p }: { p: WithId<Patient> }) {
               ],
               [
                 'Open deadlines',
-                openDeadlines.length ? (
+                openDl.length ? (
                   <span className="row gap-sm wrap">
-                    {openDeadlines.map((d) => (
-                      <Badge key={milestoneKey(d)} tone={dueState(d.due) === 'overdue' ? 'danger' : 'warn'}>
+                    {openDl.map((d) => (
+                      <Badge key={milestoneKey(d)} tone={d.overdue ? 'danger' : 'warn'}>
                         {d.label} · {formatDate(d.due)}
                       </Badge>
                     ))}
                   </span>
                 ) : (
-                  'None in the next 14 days'
+                  'None overdue or due in the next 14 days'
                 ),
               ],
             ]}
@@ -287,7 +288,7 @@ export default function PatientDetailPage() {
   const clinical = CLINICAL_ROLES.includes(s.role);
   const canLifecycle = clinical && p.status === 'admitted';
   const archived = p.status === 'discharged' || p.status === 'deceased';
-  const overdueCount = deadlinesWithin(p.milestones, -60, -1).filter((d) => !p.milestoneCompletions?.[milestoneKey(d)]).length;
+  const overdueCount = openDeadlines(p).filter((d) => d.overdue).length;
 
   const tabs: TabDef<TabKey>[] = [
     { key: 'overview', label: 'Overview' },

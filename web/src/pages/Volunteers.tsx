@@ -255,12 +255,13 @@ export default function VolunteersPage() {
           rowKey={(a) => a.id}
           empty={assignments.loading ? 'Loading…' : 'No assignments.'}
           rowClassName={(a) => (a.status === 'ended' ? 'row-muted' : undefined)}
+          exportName="volunteer-assignments"
           columns={[
             { header: 'Volunteer', cell: (a) => s.memberName(a.volunteerUid) },
             { header: 'Patient', cell: (a) => <Link to={`/patients/${a.patientId}`}>{a.patientName}</Link> },
             { header: 'Activity', cell: (a) => a.activity },
-            { header: 'Dates', cell: (a) => <>{formatDate(a.startDate)} – {a.endDate ? formatDate(a.endDate) : 'ongoing'}</> },
-            { header: 'Status', cell: (a) => <Badge value={a.status} /> },
+            { header: 'Dates', csv: (a) => `${a.startDate} – ${a.endDate ?? 'ongoing'}`, cell: (a) => <>{formatDate(a.startDate)} – {a.endDate ? formatDate(a.endDate) : 'ongoing'}</> },
+            { header: 'Status', csv: (a) => a.status, cell: (a) => <Badge value={a.status} /> },
             { header: 'Notes', cell: (a) => <span className="small">{a.notes ?? ''}</span> },
             ...(s.isAdmin
               ? [
@@ -308,12 +309,13 @@ export default function VolunteersPage() {
           rows={sortedLogs}
           rowKey={(l) => l.id}
           empty={logs.loading ? 'Loading…' : 'No time logged yet.'}
+          exportName="volunteer-logs"
           columns={[
-            { header: 'Date', cell: (l) => formatDate(l.date) },
+            { header: 'Date', csv: (l) => l.date, cell: (l) => formatDate(l.date) },
             ...(s.isAdmin ? [{ header: 'Volunteer', cell: (l: WithId<VolunteerLog>) => s.memberName(l.volunteerUid) }] : []),
-            { header: 'Time', cell: (l) => formatMinutes(l.minutes) },
+            { header: 'Minutes', csv: (l) => String(l.minutes), cell: (l) => formatMinutes(l.minutes) },
             { header: 'Activity', cell: (l) => l.activity },
-            { header: 'Patient', cell: (l) => (l.patientId ? <Link to={`/patients/${l.patientId}`}>{pName(l.patientId)}</Link> : <span className="muted">—</span>) },
+            { header: 'Patient', csv: (l) => (l.patientId ? pName(l.patientId) ?? '' : ''), cell: (l) => (l.patientId ? <Link to={`/patients/${l.patientId}`}>{pName(l.patientId)}</Link> : <span className="muted">—</span>) },
             { header: 'Note', cell: (l) => <span className="small">{l.note ?? ''}</span> },
           ]}
         />

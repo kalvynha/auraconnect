@@ -143,11 +143,12 @@ export function VisitsTab({ patient }: { patient: WithId<Patient> }) {
           rowKey={(v) => v.id}
           empty={visits.loading ? 'Loading…' : 'No visits.'}
           rowClassName={(v) => (v.status === 'missed' ? 'row-missed' : undefined)}
+          exportName="patient-visits"
           columns={[
             { header: 'When', cell: (v) => <>{formatInstant(v.scheduledStart)}–{formatTime(v.scheduledEnd)}</> },
             { header: 'Discipline', cell: (v) => v.discipline },
             { header: 'Assignee', cell: (v) => (v.assignedUid ? s.memberName(v.assignedUid) : <span className="muted">Unassigned</span>) },
-            { header: 'Status', cell: (v) => <Badge value={v.status} /> },
+            { header: 'Status', csv: (v) => v.status, cell: (v) => <Badge value={v.status} /> },
             {
               header: 'Note',
               cell: (v) => (

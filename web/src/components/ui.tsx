@@ -1,6 +1,7 @@
-import { useEffect, useState, type ButtonHTMLAttributes, type ReactNode } from 'react';
+import { isValidElement, useEffect, useState, type ButtonHTMLAttributes, type ReactNode } from 'react';
 import type { AiTextResult, Member, Patient } from '@shared/types';
 import type { WithId } from '../lib/firestore';
+import { csvFileName, downloadCsv, toCsv } from '../lib/csv';
 
 export function Page({ title, actions, children }: { title: string; actions?: ReactNode; children: ReactNode }) {
   return (
@@ -126,6 +127,40 @@ export interface Column<T> {
   header: ReactNode;
   cell: (row: T) => ReactNode;
   className?: string;
+  /** Plain-text value for CSV export. Falls back to the text of `cell`; columns with no header and no `csv` are skipped. */
+  csv?: (row: T) => string;
+  /** CSV header when `header` is not plain text. */
+  csvHeader?: string;
+}
+
+/**
+ * Best-effort plain text of a rendered node: strings, numbers and the children of plain
+ * elements (fragments, spans, links). Function components are not rendered, so columns
+ * that use them should provide `csv`.
+ */
+export function nodeText(node: ReactNode): string {
+  if (node === null || node === undefined || typeof node === 'boolean') return '';
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (Array.isArray(node)) return node.map(nodeText).join('');
+  if (isValidElement(node)) {
+    const props = node.props as { children?: ReactNode };
+    // Skip interactive controls (buttons, inputs): they are not data.
+    if (typeof node.type === 'string' && ['button', 'input', 'select', 'textarea'].includes(node.type)) return '';
+    const inner = nodeText(props.children);
+    return typeof node.type === 'string' && ['div', 'li', 'p', 'br'].includes(node.type) ? ` ${inner} ` : inner;
+  }
+  return '';
+}
+
+function exportTable<T>(name: string, columns: Column<T>[], rows: T[]) {
+  const cols = columns
+    .map((c) => ({ c, header: c.csvHeader ?? nodeText(c.header).trim() }))
+    .filter(({ c, header }) => header || c.csv)
+    .map(({ c, header }) => ({
+      header: header || 'Value',
+      value: (r: T) => (c.csv ? c.csv(r) : nodeText(c.cell(r)).replace(/\s+/g, ' ').trim()),
+    }));
+  downloadCsv(csvFileName(name), toCsv(rows, cols));
 }
 
 export function Table<T>({
@@ -135,6 +170,7 @@ export function Table<T>({
   empty = 'Nothing here yet.',
   onRowClick,
   rowClassName,
+  exportName,
 }: {
   columns: Column<T>[];
   rows: T[];
@@ -142,9 +178,22 @@ export function Table<T>({
   empty?: ReactNode;
   onRowClick?: (row: T) => void;
   rowClassName?: (row: T) => string | undefined;
+  /** When set, shows an "Export CSV" button that exports the visible rows (file name prefix). */
+  exportName?: string;
 }) {
   return (
     <div className="table-wrap">
+      {exportName && (
+        <div className="table-tools no-print">
+          <span className="muted small">{rows.length} row{rows.length === 1 ? '' : 's'}</span>
+          <Button small variant="ghost" disabled={rows.length === 0} onClick={() => exportTable(exportName, columns, rows)}>
+            Export CSV
+          </Button>
+          <Button small variant="ghost" onClick={() => window.print()}>
+            Print
+          </Button>
+        </div>
+      )}
       <table className="table">
         <thead>
           <tr>

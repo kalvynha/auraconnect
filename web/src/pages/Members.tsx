@@ -1,11 +1,11 @@
 import { useState, type FormEvent } from 'react';
 import { orderBy, query, updateDoc } from 'firebase/firestore';
-import type { Discipline, Invite, InviteMemberRequest, InviteMemberResponse, Member, Role, Team } from '@shared/types';
+import type { Capability, Discipline, Invite, InviteMemberRequest, InviteMemberResponse, Member, Role, Team } from '@shared/types';
 import { useOrgSession } from '../lib/session';
 import { orgCol, orgDoc, type WithId } from '../lib/firestore';
 import { useLiveQuery } from '../lib/hooks';
 import { call } from '../lib/firebase';
-import { DISCIPLINES, ROLES } from '../lib/constants';
+import { CAPABILITIES, CAPABILITY_LABELS, DISCIPLINES, ROLES } from '../lib/constants';
 import { errorMessage, formatInstant } from '../lib/format';
 import { setMemberTeams } from '../lib/teams';
 import { sendInvitationEmail } from '../lib/invites';
@@ -65,6 +65,61 @@ function TeamsEditor({
           ))}
         </div>
       )}
+    </Modal>
+  );
+}
+
+/**
+ * Capabilities editor (admin direct write to members/{uid}.capabilities). The admin branch of the
+ * members update rule accepts any well-formed doc, so this key is allowed as-is.
+ */
+function CapabilitiesEditor({ member, onClose }: { member: WithId<Member>; onClose: () => void }) {
+  const s = useOrgSession();
+  const [value, setValue] = useState<Capability[]>(member.capabilities ?? []);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      // Keep the canonical order so diffs in the audit trail stay readable.
+      await updateDoc(orgDoc(s.orgId, 'members', member.id), { capabilities: CAPABILITIES.filter((c) => value.includes(c)) });
+      onClose();
+    } catch (err) {
+      setError(errorMessage(err));
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      title={`Capabilities — ${member.displayName}`}
+      onClose={onClose}
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button variant="primary" busy={busy} onClick={() => void save()}>Save</Button>
+        </>
+      }
+    >
+      <ErrorBanner error={error} />
+      {member.role === 'admin' && (
+        <div className="banner banner-info">Admins implicitly hold every capability; these only matter if the role changes.</div>
+      )}
+      <p className="muted small">Grant specific permissions without making this member an admin.</p>
+      <div className="picker">
+        {CAPABILITIES.map((c) => (
+          <label key={c} className="picker-item">
+            <input
+              type="checkbox"
+              checked={value.includes(c)}
+              onChange={(e) => setValue(e.target.checked ? [...value, c] : value.filter((x) => x !== c))}
+            />
+            <span>{CAPABILITY_LABELS[c]}</span>
+          </label>
+        ))}
+      </div>
     </Modal>
   );
 }
@@ -183,12 +238,22 @@ export default function MembersPage() {
   const teams = useLiveQuery<Team>(query(orgCol(s.orgId, 'teams'), orderBy('name')), [s.orgId]);
   const invites = useLiveQuery<Invite>(query(orgCol(s.orgId, 'invites'), orderBy('createdAt', 'desc')), [s.orgId]);
   const [editing, setEditing] = useState<WithId<Member> | null>(null);
+  const [editingCaps, setEditingCaps] = useState<WithId<Member> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showInactive, setShowInactive] = useState(true);
   const teamName = (id: string) => teams.data.find((t) => t.id === id)?.name ?? '(deleted team)';
 
+  const activeAdmins = s.members.filter((m) => m.active && m.role === 'admin');
+  const isLastAdmin = (m: WithId<Member>) => m.active && m.role === 'admin' && activeAdmins.length <= 1;
+
   async function update(m: WithId<Member>, patch: Partial<Pick<Member, 'role' | 'discipline' | 'active'>>) {
-    if (m.id === s.user.uid && (patch.role && patch.role !== 'admin' || patch.active === false)) {
+    const losesAdmin = (patch.role !== undefined && patch.role !== 'admin') || patch.active === false;
+    // UI guard; the server-side guard is enforced separately.
+    if (losesAdmin && isLastAdmin(m)) {
+      setError(`${m.displayName} is the only active admin. Make another member an admin before demoting or deactivating them.`);
+      return;
+    }
+    if (m.id === s.user.uid && losesAdmin) {
       if (!window.confirm('You are changing your own admin access. You may lose access to this page. Continue?')) return;
     }
     setError(null);
@@ -217,19 +282,28 @@ export default function MembersPage() {
           rows={rows}
           rowKey={(m) => m.id}
           rowClassName={(m) => (m.active ? undefined : 'row-muted')}
+          exportName="members"
           columns={[
             { header: 'Name', cell: (m) => <strong>{m.displayName}</strong> },
             { header: 'Email', cell: (m) => m.email },
             {
               header: 'Role',
+              csv: (m) => m.role,
               cell: (m) => (
-                <select value={m.role} onChange={(e) => void update(m, { role: e.target.value as Role })}>
-                  {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+                <select
+                  value={m.role}
+                  title={isLastAdmin(m) ? 'Only active admin: promote someone else first.' : undefined}
+                  onChange={(e) => void update(m, { role: e.target.value as Role })}
+                >
+                  {ROLES.map((r) => (
+                    <option key={r} value={r} disabled={isLastAdmin(m) && r !== 'admin'}>{r}</option>
+                  ))}
                 </select>
               ),
             },
             {
               header: 'Discipline',
+              csv: (m) => m.discipline,
               cell: (m) => (
                 <select value={m.discipline} onChange={(e) => void update(m, { discipline: e.target.value as Discipline })}>
                   {DISCIPLINES.map((d) => <option key={d} value={d}>{d}</option>)}
@@ -238,6 +312,7 @@ export default function MembersPage() {
             },
             {
               header: 'Teams',
+              csv: (m) => (m.teamIds ?? []).map(teamName).join('; '),
               cell: (m) => (
                 <div className="row gap-sm wrap">
                   {(m.teamIds ?? []).map((t) => <Badge key={t} tone="info">{teamName(t)}</Badge>)}
@@ -246,9 +321,30 @@ export default function MembersPage() {
               ),
             },
             {
-              header: 'Active',
+              header: 'Capabilities',
+              csv: (m) => (m.role === 'admin' ? 'all (admin)' : (m.capabilities ?? []).join('; ')),
               cell: (m) => (
-                <input type="checkbox" checked={m.active} onChange={(e) => void update(m, { active: e.target.checked })} />
+                <div className="row gap-sm wrap">
+                  {m.role === 'admin' ? (
+                    <span className="muted small">all (admin)</span>
+                  ) : (
+                    (m.capabilities ?? []).map((c) => <Badge key={c} tone="accent">{c}</Badge>)
+                  )}
+                  <Button small variant="ghost" onClick={() => setEditingCaps(m)}>Edit</Button>
+                </div>
+              ),
+            },
+            {
+              header: 'Active',
+              csv: (m) => (m.active ? 'yes' : 'no'),
+              cell: (m) => (
+                <input
+                  type="checkbox"
+                  checked={m.active}
+                  disabled={isLastAdmin(m)}
+                  title={isLastAdmin(m) ? 'Only active admin: cannot be deactivated.' : undefined}
+                  onChange={(e) => void update(m, { active: e.target.checked })}
+                />
               ),
             },
           ]}
@@ -277,6 +373,7 @@ export default function MembersPage() {
       </Card>
 
       {editing && <TeamsEditor member={editing} teams={teams.data} onClose={() => setEditing(null)} />}
+      {editingCaps && <CapabilitiesEditor member={editingCaps} onClose={() => setEditingCaps(null)} />}
     </Page>
   );
 }

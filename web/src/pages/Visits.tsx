@@ -8,7 +8,7 @@ import { useLiveQuery } from '../lib/hooks';
 import { usePatients } from '../lib/queries';
 import { DISCIPLINES } from '../lib/constants';
 import { formatInstant, formatTime, tsToDate } from '../lib/format';
-import { Badge, Button, Card, ErrorBanner, Field, Modal, Page } from '../components/ui';
+import { Badge, Button, Card, ErrorBanner, Field, MemberSelect, Modal, Page, Table } from '../components/ui';
 import { ScheduleVisitModal, VisitActionModal, VisitActions, useCanManageVisits, type VisitActionMode } from '../components/visits';
 
 const DAY_MS = 86400000;
@@ -53,7 +53,10 @@ export default function VisitsPage() {
   const canManage = useCanManageVisits();
   const [weekStart, setWeekStart] = useState(() => startOfWeek(new Date()));
   const weekEnd = addDays(weekStart, 7);
-  const [scope, setScope] = useState<Scope>(canManage ? 'mine' : 'all');
+  // Admins coordinate the whole agency's schedule, so they start on "All".
+  const [scope, setScope] = useState<Scope>(s.isAdmin ? 'all' : canManage ? 'mine' : 'all');
+  const [assignee, setAssignee] = useState('');
+  const [layout, setLayout] = useState<'week' | 'list'>('week');
   const [discipline, setDiscipline] = useState<Discipline>(s.member?.discipline ?? 'RN');
   const [showCancelled, setShowCancelled] = useState(false);
   const [scheduling, setScheduling] = useState<Date | null>(null);
@@ -61,25 +64,28 @@ export default function VisitsPage() {
   const [action, setAction] = useState<{ visit: WithId<Visit>; mode: VisitActionMode } | null>(null);
   const patients = usePatients(s.orgId, ['admitted']);
 
+  // A chosen assignee narrows the query on the server (index: visits(assignedUid, scheduledStart)).
   const visits = useLiveQuery<Visit>(
     query(
       orgCol(s.orgId, 'visits'),
+      ...(assignee ? [where('assignedUid', '==', assignee)] : []),
       where('scheduledStart', '>=', Timestamp.fromDate(weekStart)),
       where('scheduledStart', '<', Timestamp.fromDate(weekEnd)),
       orderBy('scheduledStart'),
     ),
-    [s.orgId, weekStart.getTime()],
+    [s.orgId, weekStart.getTime(), assignee],
   );
 
   const filtered = useMemo(
     () =>
       visits.data.filter((v) => {
         if (!showCancelled && v.status === 'cancelled') return false;
+        if (assignee) return v.assignedUid === assignee;
         if (scope === 'mine') return v.assignedUid === s.user.uid;
         if (scope === 'discipline') return v.discipline === discipline;
         return true;
       }),
-    [visits.data, scope, discipline, showCancelled, s.user.uid],
+    [visits.data, scope, discipline, showCancelled, s.user.uid, assignee],
   );
   const days = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i));
   const todayStr = new Date().toDateString();
@@ -93,18 +99,25 @@ export default function VisitsPage() {
     >
       <ErrorBanner error={visits.error ?? patients.error} />
       <div className="toolbar">
-        <div className="segmented">
-          <button className={scope === 'mine' ? 'active' : ''} onClick={() => setScope('mine')}>Mine</button>
-          <button className={scope === 'discipline' ? 'active' : ''} onClick={() => setScope('discipline')}>Discipline</button>
-          <button className={scope === 'all' ? 'active' : ''} onClick={() => setScope('all')}>All</button>
+        <div className="segmented" title={assignee ? 'Clear the assignee filter to use scopes.' : undefined}>
+          <button className={scope === 'mine' ? 'active' : ''} onClick={() => { setAssignee(''); setScope('mine'); }}>Mine</button>
+          <button className={scope === 'discipline' && !assignee ? 'active' : ''} onClick={() => { setAssignee(''); setScope('discipline'); }}>Discipline</button>
+          <button className={scope === 'all' && !assignee ? 'active' : ''} onClick={() => { setAssignee(''); setScope('all'); }}>All</button>
         </div>
-        {scope === 'discipline' && (
+        {scope === 'discipline' && !assignee && (
           <Field label="Discipline" className="field-inline">
             <select value={discipline} onChange={(e) => setDiscipline(e.target.value as Discipline)}>
               {DISCIPLINES.map((d) => <option key={d} value={d}>{d}</option>)}
             </select>
           </Field>
         )}
+        <Field label="Assignee" className="field-inline">
+          <MemberSelect members={s.members} value={assignee} onChange={setAssignee} placeholder="Anyone (use scope)" />
+        </Field>
+        <div className="segmented">
+          <button className={layout === 'week' ? 'active' : ''} onClick={() => setLayout('week')}>Week</button>
+          <button className={layout === 'list' ? 'active' : ''} onClick={() => setLayout('list')}>List</button>
+        </div>
         <label className="row gap-sm small">
           <input type="checkbox" checked={showCancelled} onChange={(e) => setShowCancelled(e.target.checked)} /> Show cancelled
         </label>
@@ -121,6 +134,31 @@ export default function VisitsPage() {
           </>
         }
       >
+        {layout === 'list' ? (
+          <Table
+            rows={filtered}
+            rowKey={(v) => v.id}
+            onRowClick={(v) => setSelected(v.id)}
+            rowClassName={(v) => (v.status === 'missed' ? 'row-missed' : v.status === 'cancelled' ? 'row-muted' : undefined)}
+            empty={visits.loading ? 'Loading…' : 'No visits this week.'}
+            exportName={`visits-${weekStart.toISOString().slice(0, 10)}`}
+            columns={[
+              { header: 'Start', csv: (v) => formatInstant(v.scheduledStart), cell: (v) => formatInstant(v.scheduledStart) },
+              { header: 'End', csv: (v) => formatTime(v.scheduledEnd), cell: (v) => formatTime(v.scheduledEnd) },
+              {
+                header: 'Patient',
+                csv: (v) => v.patientName,
+                cell: (v) => <Link to={`/patients/${v.patientId}?tab=visits`} onClick={(e) => e.stopPropagation()}>{v.patientName}</Link>,
+              },
+              { header: 'Discipline', cell: (v) => v.discipline },
+              { header: 'Assignee', csv: (v) => (v.assignedUid ? s.memberName(v.assignedUid) : 'Unassigned'), cell: (v) => (v.assignedUid ? s.memberName(v.assignedUid) : <span className="muted">Unassigned</span>) },
+              { header: 'Status', csv: (v) => v.status, cell: (v) => <Badge value={v.status} /> },
+              { header: 'Note', csv: (v) => v.note ?? '', cell: (v) => <span className="small">{v.note ?? ''}</span> },
+              { header: 'Completed', csv: (v) => (v.completedAt ? `${formatInstant(v.completedAt)} by ${s.memberName(v.completedBy)}` : ''), cell: (v) => (v.completedAt ? <span className="small">{formatInstant(v.completedAt)}</span> : null) },
+              { header: '', className: 'actions', cell: (v) => <VisitActions visit={v} onAction={(mode) => setAction({ visit: v, mode })} /> },
+            ]}
+          />
+        ) : (
         <div className="week-grid">
           {days.map((d) => {
             const a = d.getTime();
@@ -162,6 +200,7 @@ export default function VisitsPage() {
             );
           })}
         </div>
+        )}
         {visits.loading && <p className="muted">Loading…</p>}
         <p className="muted small">
           Scheduled visits are marked missed automatically once they end more than the organization's grace period ago.

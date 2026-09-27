@@ -1,4 +1,4 @@
-import type { MilestoneKind, Milestones } from '@shared/types';
+import type { MilestoneKind, Milestones, Patient } from '@shared/types';
 import { daysBetween, todayISO } from './format';
 
 export interface Deadline {
@@ -60,4 +60,43 @@ export function currentBenefitPeriodNumber(m: Milestones | null | undefined): nu
 /** Milestone key used by `milestoneCompletions` / `remindedMilestones`: `{kind}:{dueDate}`. */
 export function milestoneKey(d: Pick<Deadline, 'kind' | 'due'>): string {
   return `${d.kind}:${d.due}`;
+}
+
+export interface OpenDeadline extends Deadline {
+  /** Days from `today` to the due date (negative = overdue). */
+  diff: number;
+  overdue: boolean;
+}
+
+/**
+ * Every deadline of a patient that is not yet filed/completed (`milestoneCompletions`),
+ * with no look-back cap: an overdue milestone stays overdue until it is completed.
+ * Callers pick their own look-ahead window with `diff`.
+ */
+export function openDeadlines(
+  patient: Pick<Patient, 'milestones' | 'milestoneCompletions'>,
+  today: string = todayISO(),
+): OpenDeadline[] {
+  const done = patient.milestoneCompletions ?? {};
+  return deadlinesOf(patient.milestones)
+    .filter((d) => !done[milestoneKey(d)])
+    .map((d) => {
+      const diff = daysBetween(today, d.due);
+      return { ...d, diff, overdue: diff < 0 };
+    });
+}
+
+/** Open deadlines split into all overdue ones and those due within `aheadDays` (0 = today). */
+export function deadlineCounts(
+  patient: Pick<Patient, 'milestones' | 'milestoneCompletions'>,
+  today: string,
+  aheadDays: number,
+): { overdue: number; soon: number } {
+  let overdue = 0;
+  let soon = 0;
+  for (const d of openDeadlines(patient, today)) {
+    if (d.overdue) overdue++;
+    else if (d.diff <= aheadDays) soon++;
+  }
+  return { overdue, soon };
 }
