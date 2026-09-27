@@ -1,0 +1,20 @@
+{
+  "name": "auraconnect-load",
+  "private": true,
+  "description": "Hospice-scale load test for the AuraConnect Cloud Functions handlers, run against the Firestore and Auth emulators.",
+  "scripts": {
+    "start": "tsx src/run.ts",
+    "load": "cd ../.. && npx firebase-tools emulators:exec --only firestore,auth --project demo-auraconnect \"npm --prefix tests/load start\"",
+    "compare": "tsx src/compare.ts",
+    "typecheck": "tsc --noEmit",
+    "bench": "tsx src/bench.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
+  }
+}

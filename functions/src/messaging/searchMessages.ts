@@ -9,7 +9,7 @@
  * `truncated` is true when any bound was hit, so results may be incomplete.
  * Recalled messages never match. Viewers may search their own channels.
  */
-import { Timestamp } from 'firebase-admin/firestore';
+import { Timestamp, type QueryDocumentSnapshot } from 'firebase-admin/firestore';
 import { HttpsError, onCall, type CallableRequest } from 'firebase-functions/v2/https';
 import { z } from 'zod';
 import { writeAudit } from '../lib/audit';
@@ -23,7 +23,12 @@ export const SEARCH_MAX_PER_CHANNEL = 300;
 export const SEARCH_MAX_HITS = 50;
 export const SEARCH_MAX_CHANNELS = 50;
 export const SNIPPET_CHARS = 160;
-const CHANNEL_CONCURRENCY = 10;
+/**
+ * Per-channel read pages (they add up to SEARCH_MAX_PER_CHANNEL); see {@link scanChannels}.
+ * A small first page lets common terms stop early; rare terms cost one extra round trip.
+ */
+export const SEARCH_PAGE_SIZES = [50, 250] as const;
+const CHANNEL_CONCURRENCY = 16;
 
 const schema = z.object({
   orgId: id,
@@ -53,6 +58,81 @@ export function makeSnippet(body: string, index: number, queryLength: number, si
   const end = Math.min(flat.length, start + size);
   start = Math.max(0, end - size);
   return `${start > 0 ? '…' : ''}${flat.slice(start, end).trim()}${end < flat.length ? '…' : ''}`;
+}
+
+type Hit = MessageSearchHit & { ms: number };
+
+interface ChannelScan {
+  id: string;
+  c: Channel;
+  hits: Hit[];
+  scanned: number;
+  last: QueryDocumentSnapshot | null;
+  /** createdAt (ms) of the oldest message scanned so far; unscanned messages are no newer. */
+  frontierMs: number;
+  done: boolean;
+}
+
+/**
+ * Scans each channel's newest messages (≤ {@link SEARCH_MAX_PER_CHANNEL} since `since`)
+ * for `query` and returns every hit that can be in the newest {@link SEARCH_MAX_HITS},
+ * sorted newest first, plus whether any channel hit the per-channel cap.
+ *
+ * Channels are read in pages ({@link SEARCH_PAGE_SIZES}). Once more than
+ * SEARCH_MAX_HITS hits are known, a channel whose oldest scanned message is older
+ * than the (SEARCH_MAX_HITS + 1)-th newest hit is not read further: nothing left in
+ * it can reach the result, and the result is already known to be truncated. So
+ * the hits, their order and `truncated` are exactly those of reading every
+ * channel's newest SEARCH_MAX_PER_CHANNEL messages, but common terms stop early.
+ */
+export async function scanChannels(
+  orgId: string,
+  channels: ReadonlyArray<{ id: string; c: Channel }>,
+  since: Timestamp,
+  query: string,
+): Promise<{ hits: Hit[]; capped: boolean }> {
+  const scans: ChannelScan[] = channels.map(({ id: channelId, c }) => ({ id: channelId, c, hits: [], scanned: 0, last: null, frontierMs: Infinity, done: false }));
+  let capped = false;
+  // Stable sort over hits concatenated in channel order, as a single full scan would produce.
+  const sorted = () => scans.flatMap((s) => s.hits).sort((a, b) => b.ms - a.ms);
+
+  for (const pageSize of SEARCH_PAGE_SIZES) {
+    const found = sorted();
+    if (found.length > SEARCH_MAX_HITS) {
+      const threshold = found[SEARCH_MAX_HITS]!.ms;
+      for (const s of scans) if (!s.done && s.frontierMs < threshold) s.done = true;
+    }
+    const open = scans.filter((s) => !s.done);
+    if (open.length === 0) break;
+    await inBatches(open, CHANNEL_CONCURRENCY, async (s) => {
+      const limit = Math.min(pageSize, SEARCH_MAX_PER_CHANNEL - s.scanned);
+      let q = colRef(paths.messages(orgId, s.id)).where('createdAt', '>=', since).orderBy('createdAt', 'desc');
+      if (s.last) q = q.startAfter(s.last);
+      const snap = await q.limit(limit).get();
+      for (const d of snap.docs) {
+        const m = d.data() as Message;
+        s.frontierMs = millis(m.createdAt);
+        if (m.recalledAt) continue;
+        const idx = findMatch(m.body ?? '', query);
+        if (idx < 0) continue;
+        s.hits.push({
+          channelId: s.id,
+          channelName: s.c.name ?? null,
+          messageId: d.id,
+          senderName: m.senderName ?? '',
+          snippet: makeSnippet(m.body, idx, query.length),
+          // Plain {seconds, nanoseconds} so the callable response matches TimestampLike.
+          createdAt: { seconds: m.createdAt?.seconds ?? 0, nanoseconds: m.createdAt?.nanoseconds ?? 0 },
+          ms: millis(m.createdAt),
+        });
+      }
+      s.scanned += snap.size;
+      s.last = snap.docs[snap.docs.length - 1] ?? s.last;
+      if (s.scanned >= SEARCH_MAX_PER_CHANNEL) capped = true;
+      if (snap.size < limit || s.scanned >= SEARCH_MAX_PER_CHANNEL) s.done = true;
+    });
+  }
+  return { hits: sorted(), capped };
 }
 
 async function inBatches<T, R>(items: readonly T[], size: number, fn: (t: T) => Promise<R>): Promise<R[]> {
@@ -89,34 +169,8 @@ export async function searchMessagesHandler(request: CallableRequest<SearchMessa
   }
 
   const since = Timestamp.fromMillis(sinceMs);
-  const perChannel = await inBatches(channels, CHANNEL_CONCURRENCY, async ({ id: channelId, c }) => {
-    const snap = await colRef(paths.messages(ctx.orgId, channelId))
-      .where('createdAt', '>=', since)
-      .orderBy('createdAt', 'desc')
-      .limit(SEARCH_MAX_PER_CHANNEL)
-      .get();
-    const hits: Array<MessageSearchHit & { ms: number }> = [];
-    for (const d of snap.docs) {
-      const m = d.data() as Message;
-      if (m.recalledAt) continue;
-      const idx = findMatch(m.body ?? '', input.query);
-      if (idx < 0) continue;
-      hits.push({
-        channelId,
-        channelName: c.name ?? null,
-        messageId: d.id,
-        senderName: m.senderName ?? '',
-        snippet: makeSnippet(m.body, idx, input.query.length),
-        // Plain {seconds, nanoseconds} so the callable response matches TimestampLike.
-        createdAt: { seconds: m.createdAt?.seconds ?? 0, nanoseconds: m.createdAt?.nanoseconds ?? 0 },
-        ms: millis(m.createdAt),
-      });
-    }
-    return { hits, capped: snap.size >= SEARCH_MAX_PER_CHANNEL };
-  });
-
-  const all = perChannel.flatMap((r) => r.hits).sort((a, b) => b.ms - a.ms);
-  if (perChannel.some((r) => r.capped) || all.length > SEARCH_MAX_HITS) truncated = true;
+  const { hits: all, capped } = await scanChannels(ctx.orgId, channels, since, input.query);
+  if (capped || all.length > SEARCH_MAX_HITS) truncated = true;
   const hits: MessageSearchHit[] = all.slice(0, SEARCH_MAX_HITS).map(({ ms: _ms, ...h }) => h);
 
   // The query itself may contain PHI, so only its length is audited.

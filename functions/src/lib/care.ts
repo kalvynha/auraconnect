@@ -178,10 +178,12 @@ export async function prepareTemplateTasks(
   event: TaskTemplateEvent,
   eventDate: ISODate,
   careTeamUids: readonly string[],
+  /** `careTeamRefs(orgId, careTeamUids)` when the caller already loaded it. */
+  loadedTeam?: CareTeamMemberRef[],
 ): Promise<InstantiatedTask[]> {
   const [tpl, team] = await Promise.all([
     getDocData<TaskTemplate>(carePaths.taskTemplate(orgId, event)),
-    careTeamRefs(orgId, careTeamUids),
+    loadedTeam ?? careTeamRefs(orgId, careTeamUids),
   ]);
   return instantiateTemplate(templateItemsFor(event, tpl?.items ?? null), eventDate, team);
 }

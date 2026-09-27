@@ -33,6 +33,7 @@ import { handleEscalation } from '../../src/alerts/escalateAlert';
 import { alertActionHandler } from '../../src/alerts/alertActions';
 import { admitPatientHandler } from '../../src/patients/admitPatient';
 import { checkOrgDeadlines } from '../../src/patients/checkDeadlines';
+import { raiseAlert } from '../../src/alerts/raiseAlert';
 import type { Alert, Message, Org, Role } from '../../src/shared/types';
 
 const PROJECT = process.env.GCLOUD_PROJECT ?? 'demo-auraconnect';
@@ -128,5 +129,17 @@ describe('end-to-end flows on the emulator', () => {
     expect(await checkOrgDeadlines(orgId, org, '2026-09-23')).toBe(0);
     const p = (await db.doc(`orgs/${orgId}/patients/${patientId}`).get()).data();
     expect(p?.remindedMilestones).toHaveLength(2);
+  });
+
+  it('raiseAlert is idempotent for a deterministic id (ALREADY_EXISTS from the emulator)', async () => {
+    const params = {
+      orgId, alertId: 'dup_check', title: 't', body: 'b', priority: 'normal' as const,
+      source: { type: 'manual' as const, patientId: null }, targetUids: ['admin1'], policyId: null, createdBy: 'system',
+    };
+    const results = await Promise.all([raiseAlert(params), raiseAlert(params)]);
+    expect(results.map((r) => r.created).sort()).toEqual([false, true]);
+    expect(await raiseAlert(params)).toEqual({ alertId: 'dup_check', created: false });
+    const audits = await getFirestore().collection(`orgs/${orgId}/auditLogs`).where('resourceId', '==', 'dup_check').get();
+    expect(audits.size).toBe(1);
   });
 });

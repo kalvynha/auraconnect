@@ -167,15 +167,21 @@ export class Query {
     protected readonly filters: Filter[] = [],
     protected readonly limitN: number | null = null,
     protected readonly orders: Array<{ field: string; dir: 'asc' | 'desc' }> = [],
+    /** Path of the document a `startAfter(snapshot)` cursor points at. */
+    protected readonly afterPath: string | null = null,
   ) {}
   where(field: string, op: string, value: unknown): Query {
-    return new Query(this.fs, this.collectionPath, this.groupId, [...this.filters, { field, op, value }], this.limitN, this.orders);
+    return new Query(this.fs, this.collectionPath, this.groupId, [...this.filters, { field, op, value }], this.limitN, this.orders, this.afterPath);
   }
   limit(n: number): Query {
-    return new Query(this.fs, this.collectionPath, this.groupId, this.filters, n, this.orders);
+    return new Query(this.fs, this.collectionPath, this.groupId, this.filters, n, this.orders, this.afterPath);
   }
   orderBy(field: string, dir: 'asc' | 'desc' = 'asc'): Query {
-    return new Query(this.fs, this.collectionPath, this.groupId, this.filters, this.limitN, [...this.orders, { field, dir }]);
+    return new Query(this.fs, this.collectionPath, this.groupId, this.filters, this.limitN, [...this.orders, { field, dir }], this.afterPath);
+  }
+  /** Document-snapshot cursor: results continue after that document in this query's order. */
+  startAfter(snap: DocumentSnapshot): Query {
+    return new Query(this.fs, this.collectionPath, this.groupId, this.filters, this.limitN, this.orders, snap.ref.path);
   }
   /** Aggregate count, like `query.count().get()` → `snap.data().count`. */
   count(): { get: () => Promise<{ data: () => { count: number } }> } {
@@ -230,7 +236,12 @@ export class Query {
         return (a < b ? -1 : a > b ? 1 : 0) * (o.dir === 'asc' ? 1 : -1);
       });
     }
-    return new QuerySnapshot(this.limitN === null ? docs : docs.slice(0, this.limitN));
+    // Ties keep insertion order (the sorts are stable), so cursors page consistently.
+    const from = this.afterPath === null ? 0 : docs.findIndex((d) => d.ref.path === this.afterPath) + 1;
+    const page = docs.slice(from);
+    const result = this.limitN === null ? page : page.slice(0, this.limitN);
+    this.fs.reads += Math.max(1, result.length);
+    return new QuerySnapshot(result);
   }
 }
 
@@ -270,6 +281,7 @@ export class DocumentReference {
     return this.fs.collection(`${this.path}/${id}`);
   }
   async get(): Promise<DocumentSnapshot> {
+    this.fs.reads++;
     return new DocumentSnapshot(this, this.fs.store.get(this.path));
   }
   async set(data: Data, opts?: { merge?: boolean }): Promise<void> {
@@ -332,6 +344,8 @@ export class Transaction extends WriteBatch {
 
 export class FakeFirestore {
   store = new Map<string, Data>();
+  /** Billable-style read counter: 1 per document fetched, and at least 1 per query. */
+  reads = 0;
 
   doc(path: string): DocumentReference {
     const segs = path.split('/').filter(Boolean);
@@ -397,6 +411,7 @@ export class FakeFirestore {
   }
   reset(): void {
     this.store.clear();
+    this.reads = 0;
   }
 }
 

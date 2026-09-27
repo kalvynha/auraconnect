@@ -15,6 +15,7 @@ import { z } from 'zod';
 import { todayInTimeZone } from '../domain/dates';
 import { writeAudit } from '../lib/audit';
 import { AI_DISCLAIMER, CLINICAL_SYSTEM_RULES, describeAiError, getDefaultTextGenerator, isFatalAiError, toHttpsError } from '../lib/aiText';
+import { mapLimit } from '../lib/concurrency';
 import { CLINICAL_ROLES, parse, requireOrg } from '../lib/context';
 import { db, docRef, getDocData, getMany, paths } from '../lib/db';
 import { id } from '../lib/schemas';
@@ -26,6 +27,8 @@ import type { AiDeps } from './run';
 export const IDG_PREP_DAYS = 15;
 /** Patients processed per call (one model call each); call again with `patientId` for the rest. */
 export const MAX_IDG_PREP_PATIENTS = 25;
+/** Model calls in flight per request (keeps Vertex quota use modest). */
+export const IDG_PREP_CONCURRENCY = 4;
 
 /** Not in shared/types (contract gap) — returned so clients can report partial failures. */
 export interface GenerateIdgPrepResponse {
@@ -86,15 +89,21 @@ export async function generateIdgPrepHandler(request: CallableRequest<GenerateId
   };
   const generator = deps.generator ?? getDefaultTextGenerator();
 
-  const generated: string[] = [];
-  const failed: string[] = [];
+  // The first patient runs alone, so a setup error (auth, missing model, quota) stops the call after
+  // one model request as before. The rest are generated IDG_PREP_CONCURRENCY at a time. Each result
+  // is still stored as soon as it is ready (so progress survives a timeout), but the meeting-doc
+  // transactions from this call are chained one after another, so it never contends with itself.
+  const outcome: Array<'generated' | 'failed' | undefined> = new Array(patients.length);
   let model: string | null = null;
   let lastError: unknown = null;
   let locked: HttpsError | null = null;
-  for (const { id: pid, p } of patients) {
+  let writes: Promise<unknown> = Promise.resolve();
+  const ref = docRef(meetingPath);
+  const prepOne = async ({ id: pid, p }: (typeof patients)[number], i: number): Promise<void> => {
+    if (locked) return;
     if (lastError !== null && isFatalAiError(lastError)) {
-      failed.push(pid);
-      continue;
+      outcome[i] = 'failed';
+      return;
     }
     try {
       const activity = await loadPatientActivity(ctx.orgId, pid, p, window);
@@ -104,27 +113,35 @@ export async function generateIdgPrepHandler(request: CallableRequest<GenerateId
       );
       const out = await generator.generate({ systemInstruction: IDG_PREP_SYSTEM_PROMPT, prompt, maxOutputTokens: 1024 });
       model = out.model;
-      const ref = docRef(meetingPath);
-      await db().runTransaction(async (tx) => {
-        const snap = await tx.get(ref);
-        if (!snap.exists || (snap.data() as IdgMeeting).status === 'completed') {
-          throw new HttpsError('failed-precondition', 'This meeting was completed while the prep was generated.');
-        }
-        tx.update(ref, {
-          [`aiPrep.${pid}`]: { text: `${out.text}\n\n${AI_DISCLAIMER}`, model: out.model, generatedAt: FieldValue.serverTimestamp() },
-        });
-      });
-      generated.push(pid);
+      if (locked) throw locked;
+      const write = writes.then(() =>
+        db().runTransaction(async (tx) => {
+          const snap = await tx.get(ref);
+          if (!snap.exists || (snap.data() as IdgMeeting).status === 'completed') {
+            throw new HttpsError('failed-precondition', 'This meeting was completed while the prep was generated.');
+          }
+          tx.update(ref, {
+            [`aiPrep.${pid}`]: { text: `${out.text}\n\n${AI_DISCLAIMER}`, model: out.model, generatedAt: FieldValue.serverTimestamp() },
+          });
+        }),
+      );
+      writes = write.catch(() => undefined);
+      await write;
+      outcome[i] = 'generated';
     } catch (e) {
       if (e instanceof HttpsError) {
-        locked = e;
-        break;
+        locked ??= e;
+        return;
       }
       lastError = e;
-      failed.push(pid);
+      outcome[i] = 'failed';
       logger.error('idg prep generation failed', { feature: 'generateIdgPrep', orgId: ctx.orgId, meetingId: input.meetingId, ...describeAiError(e).logFields });
     }
-  }
+  };
+  await prepOne(patients[0]!, 0);
+  await mapLimit(patients.slice(1), IDG_PREP_CONCURRENCY, (pt, i) => prepOne(pt, i + 1));
+  const generated = patients.filter((_, i) => outcome[i] === 'generated').map(({ id: pid }) => pid);
+  const failed = patients.filter((_, i) => outcome[i] === 'failed').map(({ id: pid }) => pid);
 
   await writeAudit(ctx.orgId, {
     actorUid: ctx.uid,

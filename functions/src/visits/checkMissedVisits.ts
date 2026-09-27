@@ -12,6 +12,7 @@ import { normalizeUids } from '../domain/channels';
 import { missedCutoffMs, selectMissedVisits } from '../domain/visits';
 import { raiseAlert } from '../alerts/raiseAlert';
 import { writeAudit } from '../lib/audit';
+import { mapLimit } from '../lib/concurrency';
 import { carePaths, orgSettings, tsMillis } from '../lib/care';
 import { colRef, db, docRef, getDocData, paths } from '../lib/db';
 import { loadActiveMembers, orgAdminUids } from '../lib/members';
@@ -19,6 +20,8 @@ import type { Org, Patient, Visit } from '../shared/types';
 
 /** Max visits handled per org per run; the rest are picked up next run. */
 export const MISSED_VISIT_BATCH = 200;
+/** Visits marked missed in parallel (each is its own small transaction + alert). */
+export const MISSED_VISIT_CONCURRENCY = 10;
 
 export function missedVisitAlertId(visitId: string): string {
   return `vm_${visitId}`.replace(/[^A-Za-z0-9_-]/g, '_');
@@ -57,22 +60,20 @@ export async function checkOrgMissedVisits(orgId: string, org: Partial<Org>, now
     grace,
   );
 
-  let admins: string[] | null = null;
-  let raised = 0;
-  for (const c of candidates) {
+  let admins: Promise<string[]> | null = null;
+  const raisedPerVisit = await mapLimit(candidates, MISSED_VISIT_CONCURRENCY, async (c): Promise<number> => {
     const visit = await markMissed(orgId, c.id);
-    if (!visit) continue;
+    if (!visit) return 0;
     let primary: string[] = [];
     if (visit.assignedUid) primary = [...(await loadActiveMembers(orgId, [visit.assignedUid])).keys()];
     if (primary.length === 0) {
       const patient = await getDocData<Patient>(paths.patient(orgId, visit.patientId));
       primary = [...(await loadActiveMembers(orgId, patient?.careTeamUids ?? [])).keys()];
     }
-    admins ??= await orgAdminUids(orgId);
-    const targets = normalizeUids([...primary, ...admins]);
+    const targets = normalizeUids([...primary, ...(await (admins ??= orgAdminUids(orgId)))]);
     if (targets.length === 0) {
       logger.warn('no recipients for missed-visit alert', { orgId, visitId: c.id });
-      continue;
+      return 0;
     }
     await raiseAlert({
       orgId,
@@ -85,9 +86,9 @@ export async function checkOrgMissedVisits(orgId: string, org: Partial<Org>, now
       policyId: null,
       createdBy: 'system',
     });
-    raised++;
-  }
-  return raised;
+    return 1;
+  });
+  return raisedPerVisit.reduce((a, b) => a + b, 0);
 }
 
 export async function runMissedVisitChecks(now: Date): Promise<{ orgs: number; alerts: number }> {

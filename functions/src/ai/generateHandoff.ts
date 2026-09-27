@@ -10,6 +10,7 @@ import { todayInTimeZone } from '../domain/dates';
 import { writeAudit } from '../lib/audit';
 import { AI_DISCLAIMER, CLINICAL_SYSTEM_RULES } from '../lib/aiText';
 import { parse, requireOrg } from '../lib/context';
+import { mapLimit } from '../lib/concurrency';
 import { colRef, getDocData, getMany, paths } from '../lib/db';
 import { id } from '../lib/schemas';
 import type { AiTextResult, GenerateHandoffRequest, Org, Patient } from '../shared/types';
@@ -19,6 +20,8 @@ import { generateOrThrow, type AiDeps } from './run';
 
 export const DEFAULT_HANDOFF_HOURS = 12;
 export const MAX_HANDOFF_PATIENTS = 20;
+/** Patients whose activity is loaded in parallel (5 small queries each). */
+export const HANDOFF_LOAD_CONCURRENCY = 5;
 
 const schema = z.object({
   orgId: id,
@@ -76,13 +79,20 @@ export async function generateHandoffHandler(request: CallableRequest<GenerateHa
       messageLimit: perPatientMessages,
       includeEvents: false,
     };
+    // Patients load in parallel. Each gets perPatientMessages; since patients ≤ MAX_HANDOFF_PATIENTS,
+    // patients × perPatientMessages ≤ MAX_AI_MESSAGES, so the overall budget below never binds, and it
+    // is applied in patient order afterwards (keeping the newest messages) exactly as a sequential loop would.
+    const activities = await mapLimit(patients, HANDOFF_LOAD_CONCURRENCY, ({ id: pid, p }) =>
+      loadPatientActivity(ctx.orgId, pid, p, { ...window, messageLimit: perPatientMessages }),
+    );
     const sections: string[] = [];
     let budget = MAX_AI_MESSAGES;
-    for (const { id: pid, p } of patients) {
-      const activity = await loadPatientActivity(ctx.orgId, pid, p, { ...window, messageLimit: Math.min(perPatientMessages, budget) });
-      budget -= activity.messages.length;
-      messageCount += activity.messages.length;
-      sections.push(formatPatientActivity(activity, tz, { includeEvents: false }));
+    for (const activity of activities) {
+      const keep = Math.max(0, Math.min(activity.messages.length, budget));
+      const trimmed = keep === activity.messages.length ? activity : { ...activity, messages: activity.messages.slice(activity.messages.length - keep) };
+      budget -= trimmed.messages.length;
+      messageCount += trimmed.messages.length;
+      sections.push(formatPatientActivity(trimmed, tz, { includeEvents: false }));
     }
     const prompt =
       `Time zone: ${tz}. Handoff window: last ${input.sinceHours} hours; today is ${window.today}.\n` +

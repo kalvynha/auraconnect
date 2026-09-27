@@ -3,6 +3,7 @@ import { FieldValue, type Transaction } from 'firebase-admin/firestore';
 import { HttpsError, onCall, type CallableRequest } from 'firebase-functions/v2/https';
 import { z } from 'zod';
 import { bereavementClosesOn, buildBereavementSchedule } from '../domain/bereavement';
+import type { CareTeamMemberRef } from '../domain/taskTemplates';
 import { writeAudit } from '../lib/audit';
 import {
   appendPatientEvent,
@@ -70,6 +71,8 @@ interface EndOfCare {
     patient: Patient,
   ) => { patientUpdate: Record<string, unknown>; summary: string; details: Record<string, unknown>; metadata: Record<string, unknown> };
   cancelReason: string;
+  /** Patient and active care team already loaded by the caller (avoids reading them twice). */
+  preloaded?: { patient: Patient; team: CareTeamMemberRef[] };
 }
 
 /**
@@ -79,8 +82,8 @@ interface EndOfCare {
  */
 async function endOfCare(p: EndOfCare): Promise<void> {
   const { ctx } = p;
-  const pre = await loadPatient(ctx.orgId, p.patientId);
-  const tasks = await prepareTemplateTasks(ctx.orgId, p.event, p.date, pre.careTeamUids ?? []);
+  const pre = p.preloaded?.patient ?? (await loadPatient(ctx.orgId, p.patientId));
+  const tasks = await prepareTemplateTasks(ctx.orgId, p.event, p.date, pre.careTeamUids ?? [], p.preloaded?.team);
   const now = new Date();
 
   await db().runTransaction(async (tx) => {
@@ -142,11 +145,14 @@ export async function recordDeathHandler(request: CallableRequest<RecordDeathReq
   const input = parse(deathSchema, request.data);
   const ctx = requireOrg(request, input.orgId, CLINICAL_ROLES);
   let assignee: string | null = input.bereavementAssigneeUid ?? null;
+  let preloaded: EndOfCare['preloaded'];
   if (assignee) {
     await assertActiveMembers(ctx.orgId, [assignee]);
   } else {
-    const pre = await loadPatient(ctx.orgId, input.patientId);
-    assignee = (await careTeamRefs(ctx.orgId, pre.careTeamUids ?? [])).find((m) => m.discipline === 'SW')?.uid ?? null;
+    const patient = await loadPatient(ctx.orgId, input.patientId);
+    const team = await careTeamRefs(ctx.orgId, patient.careTeamUids ?? []);
+    preloaded = { patient, team };
+    assignee = team.find((m) => m.discipline === 'SW')?.uid ?? null;
   }
   const planRef = colRef(carePaths.bereavementPlans(ctx.orgId)).doc();
 
@@ -156,6 +162,7 @@ export async function recordDeathHandler(request: CallableRequest<RecordDeathReq
     event: 'death',
     date: input.date,
     cancelReason: 'Patient deceased',
+    preloaded,
     write: (tx, patient) => {
       const death = {
         date: input.date,
