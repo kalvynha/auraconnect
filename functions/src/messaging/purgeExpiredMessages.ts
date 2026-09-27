@@ -10,6 +10,13 @@
  * the single-field createdAt index. Deletes are committed in batches of at
  * most {@link PURGE_PAGE_SIZE} (< 500 writes). Each org is capped at
  * {@link MAX_PURGE_PER_ORG_RUN} deletions per run; the rest follow next day.
+ *
+ * v3 (S6):
+ *  - `patient` channels are the clinical record of team communication and are
+ *    never purged by `messageLifespanDays`. They are purged only when
+ *    `org.patientChannelRetentionDays` is set and ≥ {@link MIN_PATIENT_RETENTION_DAYS}
+ *    (6 years), using that lifespan instead.
+ *  - Channels with `legalHold == true` are never purged.
  */
 import { Timestamp } from 'firebase-admin/firestore';
 import { logger } from 'firebase-functions/v2';
@@ -22,6 +29,9 @@ export const PURGE_PAGE_SIZE = 300;
 export const MAX_PURGE_PER_ORG_RUN = 20_000;
 export const MIN_LIFESPAN_DAYS = 7;
 export const MAX_LIFESPAN_DAYS = 3650;
+/** 6 years: the shortest retention allowed for patient channels. */
+export const MIN_PATIENT_RETENTION_DAYS = 2190;
+export const MAX_PATIENT_RETENTION_DAYS = 36500;
 
 function millis(t: TimestampLike | null | undefined): number | null {
   if (!t) return null;
@@ -35,19 +45,42 @@ export function purgeCutoffMs(nowMs: number, lifespanDays: unknown): number | nu
   return nowMs - lifespanDays * 86_400_000;
 }
 
+/** Patient-channel cutoff (ms), or null when patient channels are kept (unset, < 6 years or invalid). */
+export function patientPurgeCutoffMs(nowMs: number, retentionDays: unknown): number | null {
+  if (typeof retentionDays !== 'number' || !Number.isInteger(retentionDays)) return null;
+  if (retentionDays < MIN_PATIENT_RETENTION_DAYS || retentionDays > MAX_PATIENT_RETENTION_DAYS) return null;
+  return nowMs - retentionDays * 86_400_000;
+}
+
+export interface OrgPurgeCutoffs {
+  /** Non-patient channels (from `messageLifespanDays`). */
+  defaultMs: number | null;
+  /** `patient` channels (from `patientChannelRetentionDays`). */
+  patientMs: number | null;
+}
+
+/** Which cutoff applies to a channel, or null when it must not be purged. */
+export function channelCutoffMs(channel: Pick<Channel, 'type'> & { legalHold?: boolean }, cutoffs: OrgPurgeCutoffs): number | null {
+  if (channel.legalHold === true) return null;
+  return channel.type === 'patient' ? cutoffs.patientMs : cutoffs.defaultMs;
+}
+
 export interface PurgeStats {
   messages: number;
   attachments: number;
   channels: number;
 }
 
-export async function purgeOrgMessages(orgId: string, cutoffMs: number, maxDeletes = MAX_PURGE_PER_ORG_RUN): Promise<PurgeStats> {
+export async function purgeOrgMessages(orgId: string, cutoffs: number | OrgPurgeCutoffs, maxDeletes = MAX_PURGE_PER_ORG_RUN): Promise<PurgeStats> {
   const stats: PurgeStats = { messages: 0, attachments: 0, channels: 0 };
-  const cutoff = Timestamp.fromMillis(cutoffMs);
+  const orgCutoffs: OrgPurgeCutoffs = typeof cutoffs === 'number' ? { defaultMs: cutoffs, patientMs: null } : cutoffs;
   const channels = await colRef(paths.channels(orgId)).get();
   for (const chDoc of channels.docs) {
     if (stats.messages >= maxDeletes) break;
     const channel = chDoc.data() as Channel;
+    const cutoffMs = channelCutoffMs(channel, orgCutoffs);
+    if (cutoffMs === null) continue;
+    const cutoff = Timestamp.fromMillis(cutoffMs);
     const createdMs = millis(channel.createdAt);
     if (createdMs !== null && createdMs >= cutoffMs) continue; // nothing in it can be old enough
 
@@ -80,15 +113,23 @@ export async function purgeOrgMessages(orgId: string, cutoffMs: number, maxDelet
   return stats;
 }
 
-/** Purges every org that has a message lifespan. */
+/** Purges every org that has a message lifespan or a patient-channel retention. */
 export async function runMessagePurge(now: Date): Promise<{ orgs: number } & PurgeStats> {
-  const orgs = await db().collection('orgs').where('messageLifespanDays', '>=', MIN_LIFESPAN_DAYS).get();
+  const [byLifespan, byPatient] = await Promise.all([
+    db().collection('orgs').where('messageLifespanDays', '>=', MIN_LIFESPAN_DAYS).get(),
+    db().collection('orgs').where('patientChannelRetentionDays', '>=', MIN_PATIENT_RETENTION_DAYS).get(),
+  ]);
+  const orgDocs = new Map([...byLifespan.docs, ...byPatient.docs].map((d) => [d.id, d]));
   const total = { orgs: 0, messages: 0, attachments: 0, channels: 0 };
-  for (const doc of orgs.docs) {
-    const cutoffMs = purgeCutoffMs(now.getTime(), (doc.data() as Org).messageLifespanDays);
-    if (cutoffMs === null) continue;
+  for (const doc of orgDocs.values()) {
+    const org = doc.data() as Org;
+    const cutoffs: OrgPurgeCutoffs = {
+      defaultMs: purgeCutoffMs(now.getTime(), org.messageLifespanDays),
+      patientMs: patientPurgeCutoffMs(now.getTime(), org.patientChannelRetentionDays),
+    };
+    if (cutoffs.defaultMs === null && cutoffs.patientMs === null) continue;
     try {
-      const s = await purgeOrgMessages(doc.id, cutoffMs);
+      const s = await purgeOrgMessages(doc.id, cutoffs);
       total.orgs++;
       total.messages += s.messages;
       total.attachments += s.attachments;

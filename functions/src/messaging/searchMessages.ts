@@ -14,6 +14,7 @@ import { HttpsError, onCall, type CallableRequest } from 'firebase-functions/v2/
 import { z } from 'zod';
 import { writeAudit } from '../lib/audit';
 import { parse, requireOrg } from '../lib/context';
+import { enforceRateLimit } from '../lib/rateLimit';
 import { colRef, getDocData, paths } from '../lib/db';
 import { id } from '../lib/schemas';
 import type { Channel, Message, MessageSearchHit, SearchMessagesRequest, SearchMessagesResponse, TimestampLike } from '../shared/types';
@@ -144,6 +145,7 @@ async function inBatches<T, R>(items: readonly T[], size: number, fn: (t: T) => 
 export async function searchMessagesHandler(request: CallableRequest<SearchMessagesRequest>): Promise<SearchMessagesResponse> {
   const input = parse(schema, request.data);
   const ctx = await requireOrg(request, input.orgId);
+  await enforceRateLimit(ctx.orgId, ctx.uid, 'searchMessages');
   const nowMs = Date.now();
   const sinceMs = nowMs - SEARCH_LOOKBACK_DAYS * 86_400_000;
   let truncated = false;

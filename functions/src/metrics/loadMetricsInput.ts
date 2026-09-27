@@ -1,7 +1,9 @@
 /**
  * Reads the Firestore inputs for one org-day of {@link DailyMetrics}. Every
  * read is bounded by a date range, a status filter or an aggregate count:
- *  - patients: status == admitted, plus dischargeDate / death.date in the last 30 days
+ *  - patients: status == admitted, plus dischargeDate / death.date within the completion window
+ *    (COMPLETION_WINDOW_DAYS, 30), so recent milestone completions of patients who left still count.
+ *    Overdue deadlines have no look-back cap (S1); only completions use the 30-day window.
  *  - patients in referral: count()
  *  - alerts: createdAt in [dayStart, dayEnd)
  *  - visits: count() per status with scheduledStart in [dayStart, dayEnd)
@@ -10,7 +12,8 @@
  *  - bereavementPlans: status == active
  */
 import { Timestamp, type Query } from 'firebase-admin/firestore';
-import { addDays } from '../domain/dates';
+import { addDays, localDateParts } from '../domain/dates';
+import { completionDate } from '../domain/milestones';
 import { COMPLETION_WINDOW_DAYS, VOLUNTEER_WINDOW_DAYS, zonedDayBounds, type MetricsInput, type MetricsPatient } from '../domain/metrics';
 import { colRef, paths } from '../lib/db';
 import type { Alert, BereavementPlan, ISODate, Org, Patient, TimestampLike, TriageCall, VisitStatus, VolunteerLog } from '../shared/types';
@@ -31,11 +34,20 @@ async function count(q: Query): Promise<number> {
   return snap.data().count;
 }
 
-function toMetricsPatient(p: Patient): MetricsPatient {
+/**
+ * S5: a completion counts from `completionDate()` — its `effectiveDate` (actual filing date) when
+ * recorded, else the org-local date of `completedAt`. The metrics domain takes an instant, so the
+ * date is passed as local noon of that day in `tz`.
+ */
+function toMetricsPatient(p: Patient, tz: string): MetricsPatient {
   const completions: Record<string, number> = {};
+  const localDateOf = (at: unknown): ISODate | null => {
+    const m = ms(at as TimestampLike | null | undefined);
+    return m === null ? null : localDateParts(new Date(m), tz).date;
+  };
   for (const [key, c] of Object.entries(p.milestoneCompletions ?? {})) {
-    const at = ms(c?.completedAt);
-    if (at !== null) completions[key] = at;
+    const day = completionDate(c, localDateOf);
+    if (day) completions[key] = zonedDayBounds(day, tz).startMs + 12 * 3_600_000;
   }
   return {
     status: p.status,
@@ -74,7 +86,7 @@ export async function loadMetricsInput(orgId: string, org: Pick<Org, 'timezone'>
 
   const patients = new Map<string, MetricsPatient>();
   for (const snap of [admitted, discharged, deceased]) {
-    for (const d of snap.docs) if (!patients.has(d.id)) patients.set(d.id, toMetricsPatient(d.data() as Patient));
+    for (const d of snap.docs) if (!patients.has(d.id)) patients.set(d.id, toMetricsPatient(d.data() as Patient, tz));
   }
 
   return {
@@ -93,7 +105,7 @@ export async function loadMetricsInput(orgId: string, org: Pick<Org, 'timezone'>
     }),
     volunteerLogs: logs.docs.map((d) => {
       const l = d.data() as VolunteerLog;
-      return { date: l.date, minutes: Number(l.minutes) || 0 };
+      return { date: l.date, minutes: Number(l.minutes) || 0, voided: !!l.voidedAt };
     }),
     activeVolunteerAssignments: activeAssignments,
     bereavementPlans: plans.docs.map((d) => {

@@ -65,13 +65,16 @@ describe('admitPatient', () => {
     expect(docsIn(`orgs/${ORG}/auditLogs`).find((l) => l.data.action === 'patient.admit')?.data.patientId).toBe(patientId);
   });
 
-  it('admits an existing referral patient, keeping remindedMilestones and reusing the channel', async () => {
+  it('updates an admitted patient only with update: true, keeping remindedMilestones and reusing the channel', async () => {
     const first = await admitPatientHandler(req(admitReq(), { uid: 'b' }));
     await fakeDb.doc(`orgs/${ORG}/patients/${first.patientId}`).update({ remindedMilestones: ['noe:2026-09-25'] });
-    const again = await admitPatientHandler(req(admitReq({ patientId: first.patientId, careTeamUids: ['a'] }), { uid: 'b' }));
+    // v3 (H2): a second admission wizard can't overwrite an admitted patient.
+    await expect(admitPatientHandler(req(admitReq({ patientId: first.patientId, careTeamUids: ['a'] }), { uid: 'c' }))).rejects.toMatchObject({ code: 'already-exists' });
+    const again = await admitPatientHandler(req(admitReq({ patientId: first.patientId, careTeamUids: ['a'], update: true }), { uid: 'c' }));
     expect(again.channelId).toBe(first.channelId);
     expect(fakeDb.read<any>(`orgs/${ORG}/patients/${first.patientId}`)!.remindedMilestones).toEqual(['noe:2026-09-25']);
-    expect(fakeDb.read<any>(`orgs/${ORG}/channels/${first.channelId}`)!.memberUids.sort()).toEqual(['a', 'b', 'c']);
+    // The care team is changed with updateCareTeam, not by an admission update.
+    expect(fakeDb.read<any>(`orgs/${ORG}/channels/${first.channelId}`)!.memberUids.sort()).toEqual(['b', 'c']);
   });
 });
 

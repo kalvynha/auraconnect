@@ -8,6 +8,7 @@ import { z } from 'zod';
 import { writeAudit } from '../lib/audit';
 import { AI_DISCLAIMER, CLINICAL_SYSTEM_RULES } from '../lib/aiText';
 import { parse, requireOrg } from '../lib/context';
+import { enforceRateLimit } from '../lib/rateLimit';
 import { getDocData, paths } from '../lib/db';
 import { id } from '../lib/schemas';
 import type { AiTextResult, Channel, Org, SummarizeChannelRequest } from '../shared/types';
@@ -40,6 +41,7 @@ export async function summarizeChannelHandler(request: CallableRequest<Summarize
   const channel = await getDocData<Channel>(paths.channel(ctx.orgId, input.channelId));
   if (!channel) throw new HttpsError('not-found', 'Channel not found.');
   if (!channel.memberUids?.includes(ctx.uid)) throw new HttpsError('permission-denied', 'You are not a member of this channel.');
+  await enforceRateLimit(ctx.orgId, ctx.uid, 'summarizeChannel');
 
   const org = await getDocData<Org>(paths.org(ctx.orgId));
   const tz = org?.timezone ?? 'UTC';

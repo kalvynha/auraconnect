@@ -1,8 +1,12 @@
 /**
  * `recallMessage` — the sender or an admin (both must be channel members)
- * recalls a message: sets `recalledAt`, empties `body` and `attachments`, and
- * deletes the attachment files. When it is the channel's `lastMessage`, the
- * preview becomes "Message recalled". Recalling twice is a no-op.
+ * recalls a message: sets `recalledAt` and empties `body` and `attachments`.
+ * When it is the channel's `lastMessage`, the preview becomes "Message
+ * recalled". Recalling twice is a no-op.
+ *
+ * v3 (S6, soft recall): the original is first copied to the admin-only
+ * `messageRecalls/{channelId}_{messageId}` in the same transaction, and the
+ * attachment files are kept in Storage (the copy still references them).
  */
 import { FieldValue } from 'firebase-admin/firestore';
 import { HttpsError, onCall, type CallableRequest } from 'firebase-functions/v2/https';
@@ -11,8 +15,8 @@ import { writeAudit } from '../lib/audit';
 import { parse, requireOrg, WRITER_ROLES } from '../lib/context';
 import { db, docRef, paths } from '../lib/db';
 import { id } from '../lib/schemas';
-import { deleteStorageObjects, safeAttachmentPaths } from '../lib/storageFiles';
-import type { Channel, Message, RecallMessageRequest, TimestampLike } from '../shared/types';
+import { safeAttachmentPaths } from '../lib/storageFiles';
+import type { Channel, Message, MessageRecall, RecallMessageRequest, TimestampLike } from '../shared/types';
 
 export const RECALLED_PREVIEW = 'Message recalled';
 
@@ -29,7 +33,8 @@ export async function recallMessageHandler(request: CallableRequest<RecallMessag
   const channelRef = docRef(paths.channel(ctx.orgId, input.channelId));
   const msgRef = docRef(paths.message(ctx.orgId, input.channelId, input.messageId));
 
-  const toDelete = await db().runTransaction(async (tx) => {
+  const recallRef = docRef(`${paths.org(ctx.orgId)}/messageRecalls/${input.channelId}_${input.messageId}`);
+  await db().runTransaction(async (tx) => {
     const [cSnap, mSnap] = await Promise.all([tx.get(channelRef), tx.get(msgRef)]);
     if (!cSnap.exists) throw new HttpsError('not-found', 'Channel not found.');
     const channel = cSnap.data() as Channel;
@@ -39,8 +44,23 @@ export async function recallMessageHandler(request: CallableRequest<RecallMessag
     if (message.senderUid !== ctx.uid && ctx.role !== 'admin') {
       throw new HttpsError('permission-denied', 'Only the sender or an admin can recall a message.');
     }
-    if (message.recalledAt) return [];
+    if (message.recalledAt) return;
 
+    const copy: Omit<MessageRecall, 'recalledAt'> & { recalledAt: unknown } = {
+      channelId: input.channelId,
+      messageId: input.messageId,
+      patientId: channel.patientId ?? null,
+      senderUid: message.senderUid,
+      senderName: message.senderName ?? '',
+      body: message.body ?? '',
+      priority: message.priority ?? 'normal',
+      attachments: message.attachments ?? [],
+      threadParentId: message.threadParentId ?? null,
+      messageCreatedAt: message.createdAt ?? null,
+      recalledBy: ctx.uid,
+      recalledAt: FieldValue.serverTimestamp(),
+    };
+    tx.set(recallRef, copy);
     tx.update(msgRef, { recalledAt: FieldValue.serverTimestamp(), body: '', attachments: [] });
     const last = channel.lastMessage;
     if (!message.threadParentId && last && last.senderUid === message.senderUid && sameInstant(last.at, message.createdAt)) {
@@ -59,10 +79,7 @@ export async function recallMessageHandler(request: CallableRequest<RecallMessag
       },
       tx,
     );
-    return files;
   });
-
-  await deleteStorageObjects(toDelete);
   return {};
 }
 

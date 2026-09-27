@@ -14,6 +14,7 @@ import { z } from 'zod';
 import { normalizeUids } from '../domain/channels';
 import { writeAudit } from '../lib/audit';
 import { parse, requireOrg, WRITER_ROLES } from '../lib/context';
+import { enforceRateLimit } from '../lib/rateLimit';
 import { colRef, db, getDocData, paths } from '../lib/db';
 import { loadActiveMembers } from '../lib/members';
 import { discipline, id, priority } from '../lib/schemas';
@@ -74,9 +75,12 @@ export async function resolveBroadcastRecipients(orgId: string, t: BroadcastTarg
 export async function sendBroadcastHandler(request: CallableRequest<SendBroadcastRequest>): Promise<SendBroadcastResponse> {
   const input = parse(schema, request.data);
   const ctx = await requireOrg(request, input.orgId, WRITER_ROLES);
-
-  const sender = await getDocData<Member>(paths.member(ctx.orgId, ctx.uid));
-  if (!sender?.active) throw new HttpsError('permission-denied', 'Your membership is not active.');
+  // M4: critical broadcasts page everyone at the loudest level; admins only.
+  if (input.priority === 'critical' && ctx.role !== 'admin') {
+    throw new HttpsError('permission-denied', 'Only an administrator can send a critical broadcast.');
+  }
+  await enforceRateLimit(ctx.orgId, ctx.uid, 'sendBroadcast');
+  const sender = ctx.member;
 
   const recipients = await resolveBroadcastRecipients(ctx.orgId, input.target as BroadcastTarget, ctx.uid);
   if (recipients.length === 0) throw new HttpsError('failed-precondition', 'Nobody matches this broadcast target.');

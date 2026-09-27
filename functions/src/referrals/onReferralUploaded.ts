@@ -42,6 +42,6 @@ export async function handleReferralUploaded(
   return runExtraction(orgId, referralId, ['uploaded'], deps);
 }
 
-export const onReferralUploaded = onObjectFinalized({ region: STORAGE_TRIGGER_REGION, memory: '1GiB', timeoutSeconds: 300 }, async (event) => {
+export const onReferralUploaded = onObjectFinalized({ region: STORAGE_TRIGGER_REGION, memory: '512MiB', timeoutSeconds: 300 }, async (event) => {
   await handleReferralUploaded({ name: event.data.name, size: event.data.size, contentType: event.data.contentType });
 });

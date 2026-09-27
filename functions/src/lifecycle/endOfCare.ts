@@ -1,8 +1,18 @@
-/** `dischargePatient` and `recordDeath`: end a patient's hospice stay. */
-import { FieldValue, type Transaction } from 'firebase-admin/firestore';
+/**
+ * `dischargePatient` and `recordDeath`: end a patient's hospice stay.
+ *
+ * v3:
+ *  - H4: licensed staff (RN/NP/MD) or admins only.
+ *  - O1: the patient channel is not archived at once; `archiveAfter` = now + 72 h and the hourly
+ *    `archiveEndedChannels` job archives it. `recordDeath` may name the death `visitId`, which is
+ *    completed (ending at the time of death) instead of cancelled, and the care team gets a
+ *    normal alert "Patient death recorded" plus a system message in the channel.
+ */
+import { FieldValue, Timestamp, type Transaction } from 'firebase-admin/firestore';
 import { HttpsError, onCall, type CallableRequest } from 'firebase-functions/v2/https';
 import { z } from 'zod';
-import { bereavementClosesOn, buildBereavementSchedule } from '../domain/bereavement';
+import { bereavementClosesOn, buildBereavementSchedule, survivorFromCaregiver } from '../domain/bereavement';
+import { resolveBereavementCoordinator } from '../bereavement/coordinator';
 import type { CareTeamMemberRef } from '../domain/taskTemplates';
 import { writeAudit } from '../lib/audit';
 import {
@@ -15,10 +25,15 @@ import {
   txPatient,
   txPrepareCancelOpenWork,
   txWriteTemplateTasks,
+  assertCanActOnPatientWork,
+  requireOrgDoc,
+  tsMillis,
 } from '../lib/care';
 import { CLINICAL_ROLES, parse, requireOrg, type OrgContext } from '../lib/context';
 import { colRef, db, docRef, paths } from '../lib/db';
 import { assertActiveMembers } from '../lib/members';
+import { requireLicensed } from '../lib/permissions';
+import { alertCareTeam, txPostSystemMessage, zonedLocalToEpochMs } from './notifyCareTeam';
 import { id, isoDate } from '../lib/schemas';
 import type {
   BereavementContact,
@@ -28,7 +43,11 @@ import type {
   Patient,
   RecordDeathRequest,
   TaskTemplateEvent,
+  Visit,
 } from '../shared/types';
+
+/** O1: the patient channel stays open this long after discharge or death, then is archived. */
+export const CHANNEL_ARCHIVE_DELAY_MS = 72 * 3_600_000;
 
 export const DISCHARGE_REASON_LABELS: Record<DischargeReason, string> = {
   revocation: 'Revocation',
@@ -58,6 +77,7 @@ const deathSchema = z.object({
   notes: z.string().trim().max(2000).optional(),
   bereavementRisk: z.enum(['low', 'moderate', 'high']).default('low'),
   bereavementAssigneeUid: id.optional(),
+  visitId: id.optional(),
 });
 
 interface EndOfCare {
@@ -73,6 +93,10 @@ interface EndOfCare {
   cancelReason: string;
   /** Patient and active care team already loaded by the caller (avoids reading them twice). */
   preloaded?: { patient: Patient; team: CareTeamMemberRef[] };
+  /** O1: a visit to complete (ending at `visitEndMs`) instead of cancelling it. */
+  visit?: { id: string; endMs: number };
+  /** O1: posted in the patient channel as a system message. */
+  channelMessage?: string;
 }
 
 /**
@@ -80,13 +104,13 @@ interface EndOfCare {
  * cancels future scheduled visits and open tasks, appends the event and
  * instantiates the template for `event`.
  */
-async function endOfCare(p: EndOfCare): Promise<void> {
+async function endOfCare(p: EndOfCare): Promise<Patient> {
   const { ctx } = p;
   const pre = p.preloaded?.patient ?? (await loadPatient(ctx.orgId, p.patientId));
   const tasks = await prepareTemplateTasks(ctx.orgId, p.event, p.date, pre.careTeamUids ?? [], p.preloaded?.team);
   const now = new Date();
 
-  await db().runTransaction(async (tx) => {
+  return db().runTransaction(async (tx) => {
     const { ref, patient } = await txPatient(tx, ctx.orgId, p.patientId);
     if (patient.status !== 'admitted') {
       throw new HttpsError('failed-precondition', `Cannot record a ${p.event} for a patient with status "${patient.status}".`);
@@ -96,13 +120,39 @@ async function endOfCare(p: EndOfCare): Promise<void> {
     }
     const chRef = patient.channelId ? docRef(paths.channel(ctx.orgId, patient.channelId)) : null;
     const chSnap = chRef ? await tx.get(chRef) : null;
-    const cancel = await txPrepareCancelOpenWork(tx, ctx.orgId, p.patientId, now);
+    const visitRef = p.visit ? docRef(carePaths.visit(ctx.orgId, p.visit.id)) : null;
+    const visitSnap = visitRef ? await tx.get(visitRef) : null;
+    let visitEnd: Timestamp | null = null;
+    if (p.visit) {
+      const visit = visitSnap?.exists ? (visitSnap.data() as Visit) : null;
+      if (!visit || visit.patientId !== p.patientId) throw new HttpsError('invalid-argument', 'That visit does not belong to this patient.');
+      if (visit.status !== 'scheduled' && visit.status !== 'missed') {
+        throw new HttpsError('failed-precondition', `A ${visit.status} visit cannot be completed.`);
+      }
+      assertCanActOnPatientWork(ctx, patient.careTeamUids, [visit.assignedUid]);
+      // Ends at the time of death, but never before the visit started or after now.
+      const startMs = tsMillis(visit.scheduledStart);
+      visitEnd = Timestamp.fromMillis(Math.min(now.getTime(), Math.max(p.visit.endMs, Number.isFinite(startMs) ? startMs : p.visit.endMs)));
+    }
+    const cancel = await txPrepareCancelOpenWork(tx, ctx.orgId, p.patientId, now, p.visit ? [p.visit.id] : []);
 
     // --- writes ---
     const { patientUpdate, summary, details, metadata } = p.write(tx, patient);
     tx.update(ref, { ...patientUpdate, updatedAt: FieldValue.serverTimestamp() });
-    if (chRef && chSnap?.exists) tx.update(chRef, { archived: true });
+    const channelOpen = !!(chRef && chSnap?.exists && chSnap.get('archived') !== true);
+    if (chRef && channelOpen) {
+      tx.update(chRef, { archiveAfter: Timestamp.fromMillis(now.getTime() + CHANNEL_ARCHIVE_DELAY_MS) });
+      if (p.channelMessage) txPostSystemMessage(tx, ctx.orgId, chRef.id, p.channelMessage);
+    }
     cancel.apply(p.cancelReason);
+    if (visitRef && visitEnd) {
+      tx.update(visitRef, { status: 'completed', completedAt: visitEnd, completedBy: ctx.uid, updatedAt: FieldValue.serverTimestamp() });
+      await writeAudit(
+        ctx.orgId,
+        { actorUid: ctx.uid, action: 'visit.complete', resourceType: 'visit', resourceId: visitRef.id, patientId: p.patientId, metadata: { event: p.event } },
+        tx,
+      );
+    }
     appendPatientEvent(tx, ctx.orgId, p.patientId, { type: p.event, date: p.date, recordedBy: ctx.uid, summary, details });
     const taskIds = txWriteTemplateTasks(tx, ctx.orgId, p.event, tasks, { id: p.patientId, name: patientDisplayName(patient) }, ctx.uid);
     await writeAudit(
@@ -113,22 +163,32 @@ async function endOfCare(p: EndOfCare): Promise<void> {
         resourceType: 'patient',
         resourceId: p.patientId,
         patientId: p.patientId,
-        metadata: { ...metadata, cancelledVisits: cancel.visits, cancelledTasks: cancel.tasks, tasks: taskIds.length },
+        metadata: {
+          ...metadata,
+          cancelledVisits: cancel.visits,
+          cancelledTasks: cancel.tasks,
+          tasks: taskIds.length,
+          completedVisitId: p.visit?.id ?? null,
+          channelArchiveDelayed: channelOpen,
+        },
       },
       tx,
     );
+    return patient;
   });
 }
 
 export async function dischargePatientHandler(request: CallableRequest<DischargePatientRequest>): Promise<Record<string, never>> {
   const input = parse(dischargeSchema, request.data);
   const ctx = await requireOrg(request, input.orgId, CLINICAL_ROLES);
+  await requireLicensed(ctx);
   await endOfCare({
     ctx,
     patientId: input.patientId,
     event: 'discharge',
     date: input.dischargeDate,
     cancelReason: 'Patient discharged',
+    channelMessage: `Patient discharged by ${ctx.member.displayName || 'a care team member'}. This channel will be archived in 72 hours.`,
     write: (_tx, patient) => {
       return {
         patientUpdate: { status: 'discharged', dischargeDate: input.dischargeDate, dischargeReason: input.reason },
@@ -144,6 +204,13 @@ export async function dischargePatientHandler(request: CallableRequest<Discharge
 export async function recordDeathHandler(request: CallableRequest<RecordDeathRequest>): Promise<Record<string, never>> {
   const input = parse(deathSchema, request.data);
   const ctx = await requireOrg(request, input.orgId, CLINICAL_ROLES);
+  await requireLicensed(ctx);
+  let visit: EndOfCare['visit'];
+  if (input.visitId) {
+    const org = await requireOrgDoc(ctx.orgId);
+    const endMs = input.time ? zonedLocalToEpochMs(input.date, input.time, org.timezone || 'UTC') : Date.now();
+    visit = { id: input.visitId, endMs };
+  }
   let assignee: string | null = input.bereavementAssigneeUid ?? null;
   let preloaded: EndOfCare['preloaded'];
   if (assignee) {
@@ -152,17 +219,20 @@ export async function recordDeathHandler(request: CallableRequest<RecordDeathReq
     const patient = await loadPatient(ctx.orgId, input.patientId);
     const team = await careTeamRefs(ctx.orgId, patient.careTeamUids ?? []);
     preloaded = { patient, team };
-    assignee = team.find((m) => m.discipline === 'SW')?.uid ?? null;
+    // C1: org default coordinator (if active), else the care team's first SW.
+    assignee = await resolveBereavementCoordinator(ctx.orgId, team);
   }
   const planRef = colRef(carePaths.bereavementPlans(ctx.orgId)).doc();
 
-  await endOfCare({
+  const patient = await endOfCare({
     ctx,
     patientId: input.patientId,
     event: 'death',
     date: input.date,
     cancelReason: 'Patient deceased',
     preloaded,
+    visit,
+    channelMessage: `Patient death recorded by ${ctx.member.displayName || 'a care team member'}. This channel will be archived in 72 hours.`,
     write: (tx, patient) => {
       const death = {
         date: input.date,
@@ -171,7 +241,7 @@ export async function recordDeathHandler(request: CallableRequest<RecordDeathReq
         location: input.location ?? null,
         notes: input.notes ?? null,
       };
-      const contacts: BereavementContact[] = buildBereavementSchedule(input.date).map((c) => ({
+      const contacts: BereavementContact[] = buildBereavementSchedule(input.date, input.bereavementRisk).map((c) => ({
         ...c,
         status: 'pending',
         completedAt: null,
@@ -184,6 +254,9 @@ export async function recordDeathHandler(request: CallableRequest<RecordDeathReq
         patientName: patientDisplayName(patient),
         deathDate: input.date,
         primaryContact: patient.caregiver ?? null,
+        // C1: survivors seeded from the caregiver (bereavement/bereavement.ts edits them).
+        survivors: [survivorFromCaregiver(patient.caregiver)].filter((x) => x !== null),
+        riskHistory: [],
         riskLevel: input.bereavementRisk,
         assignedUid: assignee,
         contacts,
@@ -199,6 +272,16 @@ export async function recordDeathHandler(request: CallableRequest<RecordDeathReq
         metadata: { bereavementPlanId: planRef.id, riskLevel: input.bereavementRisk },
       };
     },
+  });
+  await alertCareTeam({
+    orgId: ctx.orgId,
+    patientId: input.patientId,
+    careTeamUids: patient.careTeamUids ?? [],
+    activeUids: preloaded?.team.map((m) => m.uid),
+    actorUid: ctx.uid,
+    alertId: `death_${input.patientId}`,
+    title: 'Patient death recorded',
+    body: `${patientDisplayName(patient)}${input.time ? ` · ${input.date} ${input.time}` : ` · ${input.date}`}`,
   });
   return {};
 }

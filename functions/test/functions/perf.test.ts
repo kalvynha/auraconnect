@@ -181,7 +181,7 @@ describe('checkOrgDeadlines (batched reads, bounded concurrency)', () => {
       const alert = fakeDb.read<any>(`orgs/${ORG}/alerts/${deadlineAlertId(pid, 'noe:2026-09-25')}`)!;
       expect(alert.targetUids).toEqual(i === 5 ? ['a'] : i % 2 ? ['b', 'c'] : ['c']);
       expect(alert.body).toBe(`Doe${i}, Jane`);
-      expect(alert.policyId).toBe('pol');
+      expect(alert.policyId).toBeNull(); // V1: upcoming reminders don't escalate
       expect(fakeDb.read<any>(`orgs/${ORG}/patients/${pid}`)!.remindedMilestones.sort()).toEqual(['hope_admission:2026-09-24', 'noe:2026-09-25']);
     });
     expect(await checkOrgDeadlines(ORG, org, '2026-09-23')).toBe(0);
@@ -203,7 +203,7 @@ describe('checkOrgMissedVisits (bounded concurrency)', () => {
     expect(await checkOrgMissedVisits(ORG, org, new Date(now))).toBe(12);
     for (let i = 0; i < 12; i++) {
       expect(fakeDb.read<any>(`orgs/${ORG}/visits/v${i}`)!.status).toBe('missed');
-      expect(fakeDb.read<any>(`orgs/${ORG}/alerts/${missedVisitAlertId(`v${i}`)}`)!.targetUids).toEqual(i % 3 === 0 ? ['a', 'b'] : ['a', 'c']);
+      expect(fakeDb.read<any>(`orgs/${ORG}/alerts/${missedVisitAlertId(`v${i}`)}`)!.targetUids).toEqual(i % 3 === 0 ? ['b'] : ['c']); // v3 (V1): default mode `assignee` (no admins)
     }
     expect(docsIn(`orgs/${ORG}/auditLogs`).filter((l) => l.data.action === 'visit.missed')).toHaveLength(12);
     expect(await checkOrgMissedVisits(ORG, org, new Date(now))).toBe(0);
@@ -255,10 +255,10 @@ describe('generateIdgPrep (bounded concurrency)', () => {
         return { text: `PREP ${id}`, model: 'm' };
       },
     };
-    const res = await generateIdgPrepHandler(req({ orgId: ORG, meetingId: 'mt1' }, { uid: 'c' }), { generator: gen });
+    // v3 (H3): the care team (b), not a mere attendee, may generate prep; it is stored in the notes subcollection.
+    const res = await generateIdgPrepHandler(req({ orgId: ORG, meetingId: 'mt1' }, { uid: 'b' }), { generator: gen });
     expect(res).toEqual({ generatedPatientIds: agenda, failedPatientIds: [] });
-    const prep = fakeDb.read<any>(meetingPath)!.aiPrep;
-    for (const id of agenda) expect(prep[id].text.startsWith(`PREP ${id}`)).toBe(true);
+    for (const id of agenda) expect(fakeDb.read<any>(`${meetingPath}/notes/${id}_aiPrep`)!.text.startsWith(`PREP ${id}`)).toBe(true);
   });
 
   it('keeps going after a non-fatal failure and lists failures in agenda order', async () => {
@@ -269,7 +269,7 @@ describe('generateIdgPrep (bounded concurrency)', () => {
         return { text: 'ok', model: 'm' };
       },
     };
-    const res = await generateIdgPrepHandler(req({ orgId: ORG, meetingId: 'mt1' }, { uid: 'c' }), { generator: gen });
+    const res = await generateIdgPrepHandler(req({ orgId: ORG, meetingId: 'mt1' }, { uid: 'b' }), { generator: gen });
     expect(res).toEqual({ generatedPatientIds: ['p1', 'p2', 'p4', 'p6'], failedPatientIds: ['p3', 'p5'] });
     spy.mockRestore();
   });
@@ -289,7 +289,8 @@ describe('recordDeath (patient and care team read once)', () => {
     expect(tasks.find((t) => t.data.discipline === 'RN')!.data.assigneeUid).toBe('c');
     // caller's member doc (requireOrg), patient + 2 members + template, then the transaction
     // (patient, channel, visits and tasks queries).
-    expect(fakeDb.reads).toBeLessThanOrEqual(1 + 1 + 2 + 1 + 1 + 1 + 1 + 6);
+    // v3 C1: + 1 org doc read for the default bereavement coordinator.
+    expect(fakeDb.reads).toBeLessThanOrEqual(1 + 1 + 2 + 1 + 1 + 1 + 1 + 6 + 1);
   });
 });
 

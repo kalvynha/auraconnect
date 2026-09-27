@@ -18,12 +18,13 @@ describe('addMonthsClamped', () => {
 });
 
 describe('buildBereavementSchedule', () => {
-  it('builds the 10 default contacts over 13 months', () => {
+  it('builds the 11 default contacts (incl. the month-1 risk reassessment) over 13 months', () => {
     const s = buildBereavementSchedule('2026-01-31');
     expect(s.map((c) => [c.id, c.type, c.dueDate])).toEqual([
       ['d3-call', 'call', '2026-02-03'],
       ['d7-letter', 'letter', '2026-02-07'],
       ['m1-letter', 'letter', '2026-02-28'],
+      ['m1-assessment', 'assessment', '2026-02-28'],
       ['m2-letter', 'letter', '2026-03-31'],
       ['m3-letter', 'letter', '2026-04-30'],
       ['m6-letter', 'letter', '2026-07-31'],

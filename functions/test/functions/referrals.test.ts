@@ -12,7 +12,7 @@ import { docsIn, ORG, req, seedOrg } from './helpers';
 const PATH = `orgs/${ORG}/referrals/r1/scan.pdf`;
 const refPath = `orgs/${ORG}/referrals/r1`;
 
-const pdf: FileLoader = async () => ({ data: Buffer.from('%PDF-1.7 fake'), contentType: 'application/pdf', size: 13 });
+const pdf: FileLoader = async (path) => ({ uri: `gs://bucket/${path}`, contentType: 'application/pdf', size: 13 });
 const fakeExtractor = (raw: unknown): Extractor => ({ extract: vi.fn(async () => ({ raw, model: 'gemini-test' })) });
 
 function seedReferral(status = 'uploaded') {
@@ -37,7 +37,7 @@ describe('onReferralUploaded → runExtraction', () => {
     });
     const res = await handleReferralUploaded({ name: PATH, size: 13 }, { extractor, loadFile: pdf });
     expect(res).toBe('needs_review');
-    expect(extractor.extract).toHaveBeenCalledWith({ data: expect.any(Buffer), mimeType: 'application/pdf' });
+    expect(extractor.extract).toHaveBeenCalledWith({ fileUri: `gs://bucket/${PATH}`, mimeType: 'application/pdf' });
     const r = fakeDb.read<any>(refPath)!;
     expect(r.status).toBe('needs_review');
     expect(r.model).toBe('gemini-test');
@@ -62,7 +62,7 @@ describe('onReferralUploaded → runExtraction', () => {
     expect(await handleReferralUploaded({ name: PATH, size: 26 * 1024 * 1024 }, { extractor: fakeExtractor({}), loadFile: pdf })).toBe('failed');
     expect(fakeDb.read<any>(refPath)!.error).toMatch(/25 MB/);
     seedReferral();
-    const txt: FileLoader = async () => ({ data: Buffer.from('x'), contentType: 'text/plain', size: 1 });
+    const txt: FileLoader = async (path) => ({ uri: `gs://bucket/${path}`, contentType: 'text/plain', size: 1 });
     expect(await handleReferralUploaded({ name: PATH, size: 1 }, { extractor: fakeExtractor({}), loadFile: txt })).toBe('failed');
   });
 
@@ -85,15 +85,15 @@ describe('onReferralUploaded → runExtraction', () => {
 describe('accept / reject referral', () => {
   const patient = { firstName: 'Ann', lastName: 'Lee' };
 
-  it('accepts from needs_review or failed, creating a referral-status patient (idempotent)', async () => {
+  it('accepts from needs_review or failed, creating a referral-status patient (a second accept is an error)', async () => {
     seedReferral('failed');
     const { patientId } = await acceptReferralHandler(req({ orgId: ORG, referralId: 'r1', patient } as any, { uid: 'b', role: 'intake' }));
     expect(fakeDb.read<any>(`orgs/${ORG}/patients/${patientId}`)).toMatchObject({
       status: 'referral', referralId: 'r1', firstName: 'Ann', sex: 'unknown', codeStatus: 'Unknown', remindedMilestones: [], milestones: null,
     });
     expect(fakeDb.read<any>(refPath)).toMatchObject({ status: 'accepted', patientId, reviewedBy: 'b' });
-    const again = await acceptReferralHandler(req({ orgId: ORG, referralId: 'r1', patient } as any, { uid: 'b' }));
-    expect(again.patientId).toBe(patientId);
+    // v3 (I2): accepting an already-accepted referral is an error, not a silent no-op.
+    await expect(acceptReferralHandler(req({ orgId: ORG, referralId: 'r1', patient } as any, { uid: 'c' }))).rejects.toMatchObject({ code: 'already-exists' });
     await expect(rejectReferralHandler(req({ orgId: ORG, referralId: 'r1', reason: 'dup' }, { uid: 'b' }))).rejects.toMatchObject({ code: 'failed-precondition' });
   });
 

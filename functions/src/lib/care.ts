@@ -45,6 +45,7 @@ export function orgSettings(org: Partial<Org> | null | undefined) {
     idgCadenceDays: org?.idgCadenceDays ?? ORG_SETTING_DEFAULTS.idgCadenceDays,
     missedVisitGraceMinutes: org?.missedVisitGraceMinutes ?? ORG_SETTING_DEFAULTS.missedVisitGraceMinutes,
     messageLifespanDays: org?.messageLifespanDays ?? ORG_SETTING_DEFAULTS.messageLifespanDays,
+    missedVisitAlertMode: org?.missedVisitAlertMode ?? ORG_SETTING_DEFAULTS.missedVisitAlertMode,
     timezone: org?.timezone || 'UTC',
   };
 }
@@ -212,12 +213,12 @@ export function txWriteTemplateTasks(
  * Reads, inside a transaction, the patient's future scheduled visits and open
  * tasks; returns a function that cancels them (call it in the write phase).
  */
-export async function txPrepareCancelOpenWork(tx: Transaction, orgId: string, patientId: string, now: Date) {
+export async function txPrepareCancelOpenWork(tx: Transaction, orgId: string, patientId: string, now: Date, keepVisitIds: readonly string[] = []) {
   const [visits, tasks] = await Promise.all([
     tx.get(colRef(carePaths.visits(orgId)).where('patientId', '==', patientId).where('status', '==', 'scheduled')),
     tx.get(colRef(carePaths.tasks(orgId)).where('patientId', '==', patientId).where('status', '==', 'open')),
   ]);
-  const futureVisits = visits.docs.filter((d) => tsMillis(d.get('scheduledStart')) > now.getTime());
+  const futureVisits = visits.docs.filter((d) => tsMillis(d.get('scheduledStart')) > now.getTime() && !keepVisitIds.includes(d.id));
   return {
     visits: futureVisits.length,
     tasks: tasks.docs.length,

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('firebase-admin/firestore', () => import('../fakes/firestore'));
 vi.mock('../../src/lib/notify', async (orig) => ({
@@ -89,7 +89,8 @@ describe('admitPatient (v2)', () => {
     expect(tasks.find((t) => t.title === 'Spiritual assessment')!.assigneeUid).toBeNull();
 
     // Re-calling for an admitted patient updates it without a second event or duplicate tasks.
-    await admit({ patientId });
+    // v3 (H2): this needs update: true from an admin or care-team member.
+    await admitPatientHandler(req(admitReq({ patientId, update: true }), { uid: 'c' }));
     expect(docsIn(`${P(patientId)}/events`)).toHaveLength(1);
     expect(tasksFor(patientId)).toHaveLength(6);
   });
@@ -107,10 +108,10 @@ describe('admitPatient (v2)', () => {
 describe('milestones', () => {
   it('completeMilestone/reopenMilestone toggle completion, and checkDeadlines skips completed keys', async () => {
     const { patientId } = await admit();
-    await expect(completeMilestoneHandler(req({ orgId: ORG, patientId, key: 'noe:2026-09-25' }, { uid: 'v', role: 'viewer' }))).rejects.toMatchObject({ code: 'permission-denied' });
-    await expect(completeMilestoneHandler(req({ orgId: ORG, patientId, key: 'noe:2026-09-26' }, { uid: 'c' }))).rejects.toMatchObject({ code: 'invalid-argument' });
-    await completeMilestoneHandler(req({ orgId: ORG, patientId, key: 'noe:2026-09-25', note: 'Filed' }, { uid: 'c' }));
-    expect(fakeDb.read<any>(P(patientId))!.milestoneCompletions['noe:2026-09-25']).toMatchObject({ completedBy: 'c', note: 'Filed' });
+    await expect(completeMilestoneHandler(req({ orgId: ORG, patientId, key: 'noe:2026-09-25', effectiveDate: '2026-09-24' }, { uid: 'v', role: 'viewer' }))).rejects.toMatchObject({ code: 'permission-denied' });
+    await expect(completeMilestoneHandler(req({ orgId: ORG, patientId, key: 'noe:2026-09-26', effectiveDate: '2026-09-24' }, { uid: 'c' }))).rejects.toMatchObject({ code: 'invalid-argument' });
+    await completeMilestoneHandler(req({ orgId: ORG, patientId, key: 'noe:2026-09-25', note: 'Filed', effectiveDate: '2026-09-24' }, { uid: 'c' }));
+    expect(fakeDb.read<any>(P(patientId))!.milestoneCompletions['noe:2026-09-25']).toMatchObject({ completedBy: 'c', note: 'Filed', effectiveDate: '2026-09-24' });
     expect(audit('milestone.complete')).toHaveLength(1);
 
     const org = fakeDb.read<Org>(`orgs/${ORG}`)!;
@@ -118,6 +119,7 @@ describe('milestones', () => {
 
     await reopenMilestoneHandler(req({ orgId: ORG, patientId, key: 'noe:2026-09-25' }, { uid: 'c' }));
     expect(fakeDb.read<any>(P(patientId))!.milestoneCompletions).toEqual({});
+    expect(fakeDb.read<any>(P(patientId))!.milestoneHistory).toMatchObject([{ key: 'noe:2026-09-25', completedBy: 'c', reopenedBy: 'c' }]);
     expect(audit('milestone.reopen')).toHaveLength(1);
     expect(await checkOrgDeadlines(ORG, org, '2026-09-23')).toBe(1); // NOE now reminded
   });
@@ -186,7 +188,10 @@ describe('recordDeath / dischargePatient', () => {
 
     const p = fakeDb.read<any>(P(patientId))!;
     expect(p).toMatchObject({ status: 'deceased', death: { date: '2026-09-25', time: '03:40', pronouncedBy: 'RN C', location: null, notes: null } });
-    expect(fakeDb.read<any>(`orgs/${ORG}/channels/${channelId}`)!.archived).toBe(true);
+    // O1: the channel stays open for 72 hours; archiveEndedChannels archives it later.
+    const ch = fakeDb.read<any>(`orgs/${ORG}/channels/${channelId}`)!;
+    expect(ch.archived).toBe(false);
+    expect(ch.archiveAfter.toMillis()).toBeGreaterThan(Date.now() + 71 * HOUR);
     expect(fakeDb.read<any>(`orgs/${ORG}/visits/future`)).toMatchObject({ status: 'cancelled', cancelledReason: 'Patient deceased' });
     expect(fakeDb.read<any>(`orgs/${ORG}/visits/past`)!.status).toBe('scheduled');
     expect(fakeDb.read<any>(`orgs/${ORG}/visits/otherPatient`)!.status).toBe('scheduled');
@@ -203,7 +208,8 @@ describe('recordDeath / dischargePatient', () => {
       patientId, patientName: 'Doe, Jane', deathDate: '2026-09-25', riskLevel: 'high', assignedUid: 's', status: 'active', closesOn: '2027-10-25',
       primaryContact: { name: 'John Doe', relationship: 'son', phone: '555-0100' },
     });
-    expect(plan.contacts).toHaveLength(10);
+    // v3 C1: 11 default contacts (incl. month-1 risk reassessment) + 4 high-risk contacts.
+    expect(plan.contacts).toHaveLength(15);
     expect(plan.contacts[0]).toMatchObject({ id: 'd3-call', dueDate: '2026-09-28', status: 'pending', completedAt: null });
 
     const ev = docsIn(`${P(patientId)}/events`).find((e) => e.data.type === 'death')!;
@@ -224,7 +230,7 @@ describe('recordDeath / dischargePatient', () => {
     const { patientId, channelId } = await admit();
     await dischargePatientHandler(req({ orgId: ORG, patientId, dischargeDate: '2026-09-26', reason: 'revocation' }, { uid: 'c' }));
     expect(fakeDb.read<any>(P(patientId))).toMatchObject({ status: 'discharged', dischargeDate: '2026-09-26', dischargeReason: 'revocation' });
-    expect(fakeDb.read<any>(`orgs/${ORG}/channels/${channelId}`)!.archived).toBe(true);
+    expect(fakeDb.read<any>(`orgs/${ORG}/channels/${channelId}`)).toMatchObject({ archived: false }); // O1: archived after 72 h
     expect(tasksFor(patientId).filter((t) => t.data.source.event === 'discharge' && t.data.status === 'open')).toHaveLength(3);
     expect(docsIn(`${P(patientId)}/events`).map((e) => e.data.type).sort()).toEqual(['admission', 'discharge']);
   });
@@ -239,7 +245,9 @@ describe('visits and tasks', () => {
     const { id } = await scheduleVisitHandler(req({ orgId: ORG, patientId, discipline: 'RN', assignedUid: 'd', start, end }, { uid: 'b' }));
     expect(fakeDb.read<any>(`orgs/${ORG}/visits/${id}`)).toMatchObject({ patientName: 'Doe, Jane', status: 'scheduled', assignedUid: 'd' });
 
-    await expect(completeVisitHandler(req({ orgId: ORG, visitId: id }, { uid: 'b' }))).rejects.toMatchObject({ code: 'permission-denied' });
+    // v3 (V4): the creator (b) may act on the visit too, so use an uninvolved clinician.
+    fakeDb.seed(`orgs/${ORG}/members/e`, member('e'));
+    await expect(completeVisitHandler(req({ orgId: ORG, visitId: id }, { uid: 'e' }))).rejects.toMatchObject({ code: 'permission-denied' });
     await completeVisitHandler(req({ orgId: ORG, visitId: id, note: 'Stable' }, { uid: 'd' }));
     expect(fakeDb.read<any>(`orgs/${ORG}/visits/${id}`)).toMatchObject({ status: 'completed', completedBy: 'd', note: 'Stable' });
     await expect(cancelVisitHandler(req({ orgId: ORG, visitId: id, reason: 'x' }, { uid: 'a', role: 'admin' }))).rejects.toMatchObject({ code: 'failed-precondition' });
@@ -281,9 +289,10 @@ describe('checkMissedVisits', () => {
     const a1 = fakeDb.read<any>(`orgs/${ORG}/alerts/${missedVisitAlertId('v1')}`)!;
     expect(a1).toMatchObject({
       title: 'Missed RN visit', body: 'Doe, Jane', priority: 'normal', createdBy: 'system', policyId: null,
-      source: { type: 'visit_missed', visitId: 'v1', patientId }, targetUids: ['a', 'd'],
+      // v3 (V1): default mode `assignee` — the assignee only; unassigned → the care-team RN.
+      source: { type: 'visit_missed', visitId: 'v1', patientId }, targetUids: ['d'],
     });
-    expect(fakeDb.read<any>(`orgs/${ORG}/alerts/${missedVisitAlertId('v2')}`)!.targetUids).toEqual(['a', 'c', 's']);
+    expect(fakeDb.read<any>(`orgs/${ORG}/alerts/${missedVisitAlertId('v2')}`)!.targetUids).toEqual(['c']);
     expect(audit('visit.missed').map((l) => l.data.actorUid)).toEqual(['system', 'system']);
 
     // Idempotent; a shorter org grace picks up v3.
@@ -295,6 +304,15 @@ describe('checkMissedVisits', () => {
 });
 
 describe('IDG meetings', () => {
+  // v3: completeIdgMeeting refuses meetings dated after today, so run these on the meeting day.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-28T18:00:00Z'));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('auto-agenda, notes, and completion updates review dates and creates action-item tasks', async () => {
     const { patientId } = await admit(); // nextIdgDueDate 2026-10-05
     const { patientId: later } = await admit({ admissionDate: '2026-09-26', patient: { ...admitReq().patient, firstName: 'Al', lastName: 'Zed' } }); // due 10-11
@@ -359,7 +377,9 @@ describe('triage', () => {
     });
     expect(audit('alert.create')[0]!.data.patientId).toBe(patientId);
 
-    await assignTriageCallHandler(req({ orgId: ORG, callId: res.callId, assignedUid: 'c' }, { uid: 'b' }));
+    // v3 (M3): the call's receiver alone may not reassign it; the assignee (d) may.
+    await expect(assignTriageCallHandler(req({ orgId: ORG, callId: res.callId, assignedUid: 'c' }, { uid: 'b' }))).rejects.toMatchObject({ code: 'permission-denied' });
+    await assignTriageCallHandler(req({ orgId: ORG, callId: res.callId, assignedUid: 'c' }, { uid: 'd' }));
     expect(fakeDb.read<any>(`orgs/${ORG}/alerts/${res.alertId}`)!.targetUids).toEqual(['d', 'c']);
 
     await resolveTriageCallHandler(req({ orgId: ORG, callId: res.callId, disposition: 'visit_made', followUpTask: { title: 'Recheck breathing', dueDate: '2026-09-27' } }, { uid: 'c' }));

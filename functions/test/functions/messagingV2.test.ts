@@ -71,8 +71,9 @@ describe('recallMessage', () => {
     expect(stored).toMatchObject({ body: '', attachments: [] });
     expect(stored.recalledAt).toBeInstanceOf(Timestamp);
     expect(fakeDb.read<any>(CH)!.lastMessage.text).toBe(RECALLED_PREVIEW);
-    // only paths under this channel's attachment folder are deleted
-    expect(deleteStorageObjects).toHaveBeenCalledWith([`orgs/${ORG}/channels/ch1/attachments/x.png`]);
+    // v3 (S6, soft recall): files are kept and the original is copied to the admin-only messageRecalls
+    expect(deleteStorageObjects).not.toHaveBeenCalled();
+    expect(fakeDb.read<any>(`orgs/${ORG}/messageRecalls/ch1_m1`)).toMatchObject({ body: 'wrong patient', recalledBy: 'b', senderUid: 'b' });
     const audit = docsIn(`orgs/${ORG}/auditLogs`).find((l) => l.data.action === 'message.recall')!;
     expect(audit.data.metadata).toEqual({ bySender: true, attachments: 1 });
     expect(JSON.stringify(audit.data)).not.toContain('wrong patient');

@@ -1,10 +1,12 @@
 import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 import { onDocumentCreated } from 'firebase-functions/v2/firestore';
 import { truncateText } from '../domain/channels';
-import { db, docRef, getDocData, paths } from '../lib/db';
+import { colRef, db, docRef, getDocData, paths } from '../lib/db';
+import { writeAudit } from '../lib/audit';
+import { logger } from 'firebase-functions/v2';
 import { messagePushTitle, pushToMembers } from '../lib/notify';
 import { raiseAlert } from '../alerts/raiseAlert';
-import type { Channel, Member, Message, TimestampLike } from '../shared/types';
+import type { Alert, Channel, Member, Message, TimestampLike } from '../shared/types';
 import { FIRESTORE_TRIGGER_REGION } from '../lib/regions';
 
 function toMillis(t: TimestampLike | null | undefined): number {
@@ -62,6 +64,13 @@ export async function handleMessageCreated(orgId: string, channelId: string, mes
   });
   if (!channel) return;
 
+  // O2: posting in a channel acknowledges the sender's own open alerts for urgent messages there.
+  try {
+    await ackMessageAlertsOnReply(orgId, channelId, message.senderUid);
+  } catch (e) {
+    logger.warn('auto-ack on reply failed', { orgId, code: (e as { code?: unknown })?.code ?? (e as Error)?.name ?? 'unknown' });
+  }
+
   const recipients = channel.memberUids.filter((u) => u !== message.senderUid);
   if (recipients.length === 0) return;
 
@@ -96,6 +105,39 @@ export async function handleMessageCreated(orgId: string, channelId: string, mes
     channelId,
     priority: message.priority,
   });
+}
+
+/**
+ * O2: acknowledges `uid`'s open alerts raised by urgent/critical messages in `channelId`
+ * (source `message`, same channel, `uid` in `currentTargetUids`). Returns the acked alert ids.
+ * Index: alerts (source.channelId, currentTargetUids array, status).
+ */
+export async function ackMessageAlertsOnReply(orgId: string, channelId: string, uid: string): Promise<string[]> {
+  const snap = await colRef(paths.alerts(orgId))
+    .where('source.channelId', '==', channelId)
+    .where('currentTargetUids', 'array-contains', uid)
+    .where('status', '==', 'open')
+    .limit(20)
+    .get();
+  const acked: string[] = [];
+  for (const d of snap.docs) {
+    const done = await db().runTransaction(async (tx) => {
+      const cur = await tx.get(d.ref);
+      if (!cur.exists) return false;
+      const alert = cur.data() as Alert;
+      if (alert.status !== 'open' || alert.source.type !== 'message' || alert.source.channelId !== channelId) return false;
+      if (!(alert.currentTargetUids ?? []).includes(uid)) return false;
+      tx.update(d.ref, { status: 'acked', ackedBy: uid, ackedAt: FieldValue.serverTimestamp() });
+      await writeAudit(
+        orgId,
+        { actorUid: uid, action: 'alert.ack', resourceType: 'alert', resourceId: d.id, patientId: null, metadata: { level: alert.level, via: 'reply' } },
+        tx,
+      );
+      return true;
+    });
+    if (done) acked.push(d.id);
+  }
+  return acked;
 }
 
 export const onMessageCreated = onDocumentCreated(

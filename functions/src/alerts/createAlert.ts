@@ -2,6 +2,7 @@ import { HttpsError, onCall, type CallableRequest } from 'firebase-functions/v2/
 import { z } from 'zod';
 import { normalizeUids } from '../domain/channels';
 import { parse, requireOrg, WRITER_ROLES } from '../lib/context';
+import { enforceRateLimit } from '../lib/rateLimit';
 import { getDocData, paths } from '../lib/db';
 import { assertActiveMembers } from '../lib/members';
 import { id, priority, uidList } from '../lib/schemas';
@@ -25,6 +26,7 @@ const schema = z
 export async function createAlertHandler(request: CallableRequest<CreateAlertRequest>): Promise<CreateAlertResponse> {
   const input = parse(schema, request.data);
   const ctx = await requireOrg(request, input.orgId, WRITER_ROLES);
+  await enforceRateLimit(ctx.orgId, ctx.uid, 'createAlert');
 
   let targets = [...(input.targetUids ?? [])];
   if (input.roleKey) {

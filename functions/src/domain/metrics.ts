@@ -9,10 +9,10 @@
  *  - alerts: alerts created during the day; acked = those with ackedAt;
  *    medianAckMinutes over those; exhausted = those marked exhausted.
  *  - deadlines (admitted patients, completed keys excluded):
- *    dueNext7Days = due in [date, date + 7]; overdue = due before date (up to
- *    the reminder window of 30 days); completedOnTime30d / completedLate30d =
- *    completions whose org-local completion date is in (date − 30, date],
- *    on time when that local date ≤ the key's due date.
+ *    dueNext7Days = due in [date, date + 7]; overdue = due before date (no
+ *    look-back cap); completedOnTime30d / completedLate30d = completions whose
+ *    completion date (`completionDate()`: effectiveDate, else the org-local date
+ *    of completedAt) is in (date − 30, date], on time when it is ≤ the key's due date.
  *  - visits: visits scheduled to start during the day, by status.
  *  - triage: calls received during the day; emergent count; median minutes
  *    from received to resolved over the resolved ones.
@@ -71,7 +71,8 @@ export interface MetricsInput {
   /** Visits scheduled during the day, by status (counts or derived with {@link countVisits}). */
   visits: Record<VisitStatus, number>;
   triageCalls: MetricsTriageCall[];
-  volunteerLogs: Array<{ date: ISODate; minutes: number }>;
+  /** v3: `voided` logs (voidVolunteerLog) are excluded. */
+  volunteerLogs: Array<{ date: ISODate; minutes: number; voided?: boolean }>;
   activeVolunteerAssignments: number;
   bereavementPlans: MetricsBereavementPlan[];
 }
@@ -148,7 +149,7 @@ export function computeDailyMetricsValues(input: MetricsInput): DailyMetricsValu
 
   const volunteerFrom = addDays(date, -VOLUNTEER_WINDOW_DAYS); // exclusive
   const minutesLast30d = input.volunteerLogs
-    .filter((l) => compareISO(l.date, volunteerFrom) > 0 && compareISO(l.date, date) <= 0)
+    .filter((l) => !l.voided && compareISO(l.date, volunteerFrom) > 0 && compareISO(l.date, date) <= 0)
     .reduce((sum, l) => sum + (Number.isFinite(l.minutes) ? l.minutes : 0), 0);
 
   const active = input.bereavementPlans.filter((p) => p.status === 'active');

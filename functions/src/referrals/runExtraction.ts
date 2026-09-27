@@ -1,83 +1,143 @@
 /**
  * Shared extraction pipeline used by the storage trigger and the retry callable:
- * status → extracting, download file, Gemini extraction, normalize, status →
- * needs_review. Any failure → status failed with a PHI-free error message.
+ * status → extracting (with `extractionStartedAt`), resolve the gs:// file, Gemini extraction,
+ * normalize, duplicate check, status → needs_review. Any failure → status failed with a PHI-free error message.
  */
-import { FieldValue } from 'firebase-admin/firestore';
+import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 import { getStorage } from 'firebase-admin/storage';
 import { logger } from 'firebase-functions/v2';
+import { HttpsError } from 'firebase-functions/v2/https';
 import { normalizeExtraction } from '../domain/referralNormalize';
 import { writeAudit } from '../lib/audit';
 import { db, docRef, paths } from '../lib/db';
 import { ExtractionError, getDefaultExtractor, type Extractor } from '../lib/gemini';
-import type { Referral, ReferralStatus } from '../shared/types';
+import {
+  REFERRAL_MIME_TYPES,
+  REFERRAL_RETRY_COOLDOWN_MINUTES,
+  REFERRAL_STALE_MINUTES,
+  type Referral,
+  type ReferralStatus,
+  type TimestampLike,
+} from '../shared/types';
+import { findPossibleDuplicates } from './duplicates';
 
 export const MAX_REFERRAL_BYTES = 25 * 1024 * 1024;
-export const ALLOWED_MIME = /^(application\/pdf|image\/(png|jpe?g|heic|heif|webp|tiff?))$/i;
+/** Exactly {@link REFERRAL_MIME_TYPES} (what Gemini accepts; also enforced by the rules). */
+export const ALLOWED_MIME = new RegExp(`^(${REFERRAL_MIME_TYPES.map((t) => t.replace(/[/.+]/g, '\\$&')).join('|')})$`, 'i');
 
-export interface LoadedFile {
-  data: Buffer;
+export interface ReferralFileRef {
+  /** `gs://bucket/path` handed to the model. */
+  uri: string;
   contentType: string;
   size: number;
 }
 
-export type FileLoader = (storagePath: string) => Promise<LoadedFile>;
+/** Resolves the uploaded file's `gs://` URI and metadata without downloading it. */
+export type FileLoader = (storagePath: string) => Promise<ReferralFileRef>;
 
 export const storageFileLoader: FileLoader = async (storagePath) => {
-  const file = getStorage().bucket().file(storagePath);
+  const bucket = getStorage().bucket();
+  const file = bucket.file(storagePath);
   const [exists] = await file.exists();
   if (!exists) throw new ExtractionError('file_missing', 'The uploaded file could not be found.');
   const [meta] = await file.getMetadata();
-  const size = Number(meta.size ?? 0);
-  if (size > MAX_REFERRAL_BYTES) throw new ExtractionError('file_too_large', 'The file is larger than 25 MB.');
-  const [data] = await file.download();
-  return { data, contentType: String(meta.contentType ?? ''), size };
+  return { uri: `gs://${bucket.name}/${storagePath}`, contentType: String(meta.contentType ?? ''), size: Number(meta.size ?? 0) };
 };
 
 export interface RunExtractionDeps {
   extractor?: Extractor;
   loadFile?: FileLoader;
+  /** Clock for staleness/cooldown checks (tests). */
+  now?: () => number;
 }
 
 export type RunExtractionResult = 'needs_review' | 'failed' | 'skipped';
 
+export interface RunExtractionOptions {
+  /** Also allow `uploaded`/`extracting` once older than {@link REFERRAL_STALE_MINUTES}. */
+  allowStale?: boolean;
+  /** Retry by a person: enforces the per-referral cooldown and records `retryRequestedAt`. */
+  retryBy?: string;
+}
+
+function millis(t: TimestampLike | null | undefined): number | null {
+  if (!t) return null;
+  if (typeof t.toMillis === 'function') return t.toMillis();
+  return t.seconds * 1000 + Math.floor((t.nanoseconds ?? 0) / 1e6);
+}
+
+/** When the referral's current `uploaded`/`extracting` state began. */
+export function stuckSinceMs(r: Pick<Referral, 'status' | 'extractionStartedAt' | 'updatedAt' | 'createdAt'>): number | null {
+  if (r.status === 'extracting') return millis(r.extractionStartedAt) ?? millis(r.updatedAt) ?? millis(r.createdAt);
+  if (r.status === 'uploaded') return millis(r.updatedAt) ?? millis(r.createdAt);
+  return null;
+}
+
+/** True when an `uploaded`/`extracting` referral has been stuck longer than the stale window. */
+export function isStaleReferral(r: Pick<Referral, 'status' | 'extractionStartedAt' | 'updatedAt' | 'createdAt'>, nowMs: number): boolean {
+  const since = stuckSinceMs(r);
+  return since !== null && nowMs - since > REFERRAL_STALE_MINUTES * 60_000;
+}
+
 /**
- * Runs extraction for `referralId` if its status is one of `allowedFrom`.
- * The status check + transition to `extracting` is transactional, so
- * duplicate trigger deliveries don't run the model twice.
+ * Runs extraction for `referralId` if its status is one of `allowedFrom` (or, with
+ * `allowStale`, it is stuck). The status check + transition to `extracting` is
+ * transactional, so duplicate trigger deliveries don't run the model twice.
  */
 export async function runExtraction(
   orgId: string,
   referralId: string,
   allowedFrom: readonly ReferralStatus[] = ['uploaded'],
   deps: RunExtractionDeps = {},
+  opts: RunExtractionOptions = {},
 ): Promise<RunExtractionResult> {
   const ref = docRef(paths.referral(orgId, referralId));
+  const nowMs = (deps.now ?? Date.now)();
   const referral = await db().runTransaction(async (tx) => {
     const snap = await tx.get(ref);
     if (!snap.exists) return null;
     const r = snap.data() as Referral;
-    if (!allowedFrom.includes(r.status)) return null;
-    tx.update(ref, { status: 'extracting', error: null, updatedAt: FieldValue.serverTimestamp() });
+    const allowed = allowedFrom.includes(r.status) || (opts.allowStale === true && isStaleReferral(r, nowMs));
+    if (!allowed || !r.storagePath) return null;
+    if (opts.retryBy) {
+      const last = millis(r.retryRequestedAt);
+      if (last !== null && nowMs - last < REFERRAL_RETRY_COOLDOWN_MINUTES * 60_000) {
+        throw new HttpsError('resource-exhausted', `Extraction was retried recently. Try again in ${REFERRAL_RETRY_COOLDOWN_MINUTES} minutes.`);
+      }
+    }
+    const now = FieldValue.serverTimestamp();
+    tx.update(ref, {
+      status: 'extracting',
+      error: null,
+      extractionStartedAt: Timestamp.fromMillis(nowMs),
+      ...(opts.retryBy ? { retryRequestedAt: Timestamp.fromMillis(nowMs) } : {}),
+      updatedAt: now,
+    });
     return r;
   });
   if (!referral) return 'skipped';
 
   try {
-    const file = await (deps.loadFile ?? storageFileLoader)(referral.storagePath);
-    if (file.size > MAX_REFERRAL_BYTES || file.data.length > MAX_REFERRAL_BYTES) {
-      throw new ExtractionError('file_too_large', 'The file is larger than 25 MB.');
-    }
+    const file = await (deps.loadFile ?? storageFileLoader)(referral.storagePath as string);
+    if (file.size > MAX_REFERRAL_BYTES) throw new ExtractionError('file_too_large', 'The file is larger than 25 MB.');
     const mimeType = (file.contentType || referral.contentType || '').toLowerCase();
-    if (!ALLOWED_MIME.test(mimeType)) throw new ExtractionError('bad_type', 'Only PDF and image files can be extracted.');
+    if (!ALLOWED_MIME.test(mimeType)) throw new ExtractionError('bad_type', 'Only PDF, PNG, JPEG, WebP and HEIC files can be extracted.');
 
-    const out = await (deps.extractor ?? getDefaultExtractor()).extract({ data: file.data, mimeType });
+    const out = await (deps.extractor ?? getDefaultExtractor()).extract({ fileUri: file.uri, mimeType });
     const extracted = normalizeExtraction(out.raw);
+    let possibleDuplicates: Awaited<ReturnType<typeof findPossibleDuplicates>> = [];
+    try {
+      possibleDuplicates = await findPossibleDuplicates(orgId, { patient: extracted.patient, referralId, now: new Date(nowMs) });
+    } catch (e) {
+      // Never block review on the duplicate check; acceptReferral re-checks.
+      logger.warn('referral duplicate check failed', { orgId, referralId, code: (e as { code?: unknown })?.code ?? 'unknown' });
+    }
     await ref.update({
       status: 'needs_review',
       extracted,
       model: out.model,
       error: null,
+      possibleDuplicates,
       updatedAt: FieldValue.serverTimestamp(),
     });
     await writeAudit(orgId, {
@@ -85,7 +145,12 @@ export async function runExtraction(
       action: 'referral.extract',
       resourceType: 'referral',
       resourceId: referralId,
-      metadata: { model: out.model, fields: Object.keys(extracted.fieldConfidence).length, warnings: extracted.warnings.length },
+      metadata: {
+        model: out.model,
+        fields: Object.keys(extracted.fieldConfidence).length,
+        warnings: extracted.warnings.length,
+        possibleDuplicates: possibleDuplicates.length,
+      },
     });
     return 'needs_review';
   } catch (e) {

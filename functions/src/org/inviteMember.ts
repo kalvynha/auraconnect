@@ -1,11 +1,16 @@
-import { FieldValue } from 'firebase-admin/firestore';
+import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 import { HttpsError, onCall, type CallableRequest } from 'firebase-functions/v2/https';
 import { z } from 'zod';
 import { writeAudit } from '../lib/audit';
 import { parse, requireOrg } from '../lib/context';
 import { colRef, getMany, paths } from '../lib/db';
 import { discipline, id, role } from '../lib/schemas';
-import type { InviteMemberRequest, InviteMemberResponse, Team } from '../shared/types';
+import { INVITE_TTL_DAYS, type InviteMemberRequest, type InviteMemberResponse, type Team } from '../shared/types';
+
+/** Invites expire INVITE_TTL_DAYS after they are created or re-sent (checked by `acceptInvite`). */
+export function inviteExpiry(nowMs = Date.now()): Timestamp {
+  return Timestamp.fromMillis(nowMs + INVITE_TTL_DAYS * 86_400_000);
+}
 
 const schema = z.object({
   orgId: id,
@@ -30,7 +35,7 @@ export async function inviteMemberHandler(request: CallableRequest<InviteMemberR
     throw new HttpsError('already-exists', 'This person is already a member of the organization.');
   }
 
-  const fields = { displayName: input.displayName, role: input.role, discipline: input.discipline, teamIds };
+  const fields = { displayName: input.displayName, role: input.role, discipline: input.discipline, teamIds, expiresAt: inviteExpiry() };
   const pending = await colRef(paths.invites(ctx.orgId))
     .where('email', '==', input.email)
     .where('status', '==', 'pending')

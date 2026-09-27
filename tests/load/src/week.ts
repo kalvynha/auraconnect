@@ -233,7 +233,7 @@ export async function runWeek(w: World, r: Rng, cfg: WeekConfig): Promise<JobRun
   const recertDone = new Set<string>();
 
   // Pre-compute recert candidates: admitted patients currently in benefit period ≥ 2.
-  const recertCandidates: Array<{ p: PatientRec; periodNumber: number; f2f: boolean; f2fDate: string | null }> = [];
+  const recertCandidates: Array<{ p: PatientRec; periodNumber: number; f2f: boolean; f2fDate: string | null; certDate: string }> = [];
   {
     const snaps = await db.getAll(...w.patients.filter((p) => !reserved.has(p.id)).map((p) => db.doc(`orgs/${orgId}/patients/${p.id}`)));
     const today = isoDateUTC(w.nowMs);
@@ -245,7 +245,8 @@ export async function runWeek(w: World, r: Rng, cfg: WeekConfig): Promise<JobRun
       // The first computed period is certified at admission; only later ones are recertified.
       if (!period || idx < 1) continue;
       const rec = w.patients.find((x) => x.id === s.id)!;
-      recertCandidates.push({ p: rec, periodNumber: period.number, f2f: period.f2fRequired, f2fDate: period.f2fRequired ? period.f2fDueBy : null });
+      // v3 (S4): the certification must be dated within the 15 days before the period starts.
+      recertCandidates.push({ p: rec, periodNumber: period.number, f2f: period.f2fRequired, f2fDate: period.f2fRequired ? period.f2fDueBy : null, certDate: period.start });
     }
     r.shuffle(recertCandidates);
   }
@@ -361,7 +362,7 @@ export async function runWeek(w: World, r: Rng, cfg: WeekConfig): Promise<JobRun
         await attempt('trigger:onReferralUploaded', () =>
           handleReferralUploaded(
             { name: storagePath, size: 250_000, contentType: 'application/pdf' },
-            { extractor: fakeExtractor(cfg.geminiLatencyMs), loadFile: async () => ({ data: Buffer.from('%PDF-1.4 fake'), contentType: 'application/pdf', size: 250_000 }) },
+            { extractor: fakeExtractor(cfg.geminiLatencyMs), loadFile: async (path: string) => ({ uri: `gs://load-test-bucket/${path}`, contentType: 'application/pdf', size: 250_000 }) },
           ),
         );
         if (idx >= 10) {
@@ -406,7 +407,7 @@ export async function runWeek(w: World, r: Rng, cfg: WeekConfig): Promise<JobRun
         await pool(d < 6 ? scheduleFor(rec, d + 1) : [], 4);
         const p = (await db.doc(`orgs/${orgId}/patients/${rec.id}`).get()).data() as Patient;
         await attempt('callable:completeMilestone', () =>
-          completeMilestoneHandler(as({ orgId, patientId: rec.id, key: milestoneKey('noe', p.milestones!.noeDueDate), note: 'NOE filed' }, intake)),
+          completeMilestoneHandler(as({ orgId, patientId: rec.id, key: milestoneKey('noe', p.milestones!.noeDueDate), note: 'NOE filed', effectiveDate: [date, new Date().toISOString().slice(0, 10)].sort()[0]! }, intake)),
         );
       });
     }
@@ -447,7 +448,7 @@ export async function runWeek(w: World, r: Rng, cfg: WeekConfig): Promise<JobRun
             recordRecertificationHandler(
               as(
                 {
-                  orgId, patientId: cand.p.id, periodNumber: cand.periodNumber, certifyingPhysician: 'Dr. Medical Director', certificationDate: date,
+                  orgId, patientId: cand.p.id, periodNumber: cand.periodNumber, certifyingPhysician: 'Dr. Medical Director', certificationDate: cand.certDate,
                   ...(cand.f2f ? { f2fDate: cand.f2fDate!, f2fBy: 'Nina Practitioner' } : {}),
                 },
                 staff(cand.p.md),

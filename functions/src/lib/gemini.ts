@@ -1,21 +1,27 @@
 /**
  * Referral extraction with Gemini on Vertex AI.
  *
- * The file is sent as an inline base64 part (≤ 25 MB, enforced by the caller)
- * with a JSON response schema matching {@link ReferralExtraction}. Vertex's
+ * The file is passed by reference (`fileData.fileUri = gs://bucket/path`), so large
+ * PDFs are never inlined into the request or held in function memory; Vertex AI reads
+ * the object directly from the project's bucket (≤ 25 MB, enforced by the caller).
+ * The response uses a JSON schema matching {@link ReferralExtraction}. Vertex's
  * schema subset has no free-form maps, so `fieldConfidence` is requested as an
  * array of `{ path, confidence }` and converted by `normalizeExtraction`.
  * Data stays inside the project's Google Cloud boundary (Vertex AI, covered by
  * the Google Cloud BAA) — do not swap this for the consumer Gemini API.
  */
-import { GoogleGenAI, Type, type Schema } from '@google/genai';
+import { FinishReason, GoogleGenAI, Type, type Schema } from '@google/genai';
 import { defineString } from 'firebase-functions/params';
 
 export const GEMINI_MODEL = defineString('GEMINI_MODEL', { default: 'gemini-2.5-flash' });
 export const VERTEX_LOCATION = defineString('VERTEX_LOCATION', { default: 'us-central1' });
 
+/** Cap on the model's JSON output (a long medication list fits comfortably). */
+export const MAX_OUTPUT_TOKENS = 16384;
+
 export interface ExtractorInput {
-  data: Buffer;
+  /** `gs://{bucket}/{path}` of the referral file. */
+  fileUri: string;
   mimeType: string;
 }
 
@@ -162,7 +168,7 @@ export class VertexGeminiExtractor implements Extractor {
         {
           role: 'user',
           parts: [
-            { inlineData: { mimeType: input.mimeType, data: input.data.toString('base64') } },
+            { fileData: { fileUri: input.fileUri, mimeType: input.mimeType } },
             { text: 'Extract the hospice referral data from this document.' },
           ],
         },
@@ -172,9 +178,13 @@ export class VertexGeminiExtractor implements Extractor {
         responseMimeType: 'application/json',
         responseSchema: REFERRAL_RESPONSE_SCHEMA,
         temperature: 0,
+        maxOutputTokens: MAX_OUTPUT_TOKENS,
       },
     });
     const text = response.text;
+    if (response.candidates?.[0]?.finishReason === FinishReason.MAX_TOKENS) {
+      throw new ExtractionError('model_truncated', 'The document is too long for AI extraction. Enter the referral manually.');
+    }
     if (!text) throw new ExtractionError('model_empty', 'The model returned no output.');
     let raw: unknown;
     try {

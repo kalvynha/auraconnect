@@ -5,6 +5,7 @@ import { writeAudit } from '../lib/audit';
 import { appendPatientEvent, txPatient } from '../lib/care';
 import { CLINICAL_ROLES, parse, requireOrg } from '../lib/context';
 import { db } from '../lib/db';
+import { requireLicensed } from '../lib/permissions';
 import { id, isoDate } from '../lib/schemas';
 import type { ChangeLevelOfCareRequest, LevelOfCare } from '../shared/types';
 
@@ -26,6 +27,7 @@ const schema = z.object({
 export async function changeLevelOfCareHandler(request: CallableRequest<ChangeLevelOfCareRequest>): Promise<Record<string, never>> {
   const input = parse(schema, request.data);
   const ctx = await requireOrg(request, input.orgId, CLINICAL_ROLES);
+  await requireLicensed(ctx); // H4
   await db().runTransaction(async (tx) => {
     const { ref, patient } = await txPatient(tx, ctx.orgId, input.patientId);
     if (patient.status !== 'admitted') throw new HttpsError('failed-precondition', 'Only admitted patients have a level of care.');

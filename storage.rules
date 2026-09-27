@@ -83,8 +83,8 @@ service firebase.storage {
         && hasRole(orgId, ['admin', 'clinician', 'intake'])
         && underMaxSize()
         && request.resource.contentType != null
-        && (request.resource.contentType == 'application/pdf'
-            || request.resource.contentType.matches('image/.*'));
+        // v3 (I1): exactly REFERRAL_MIME_TYPES in shared/types.ts (what the extractor accepts).
+        && request.resource.contentType in ['application/pdf', 'image/png', 'image/jpeg', 'image/webp', 'image/heic', 'image/heif'];
       allow update, delete: if false;
     }
 

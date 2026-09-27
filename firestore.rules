@@ -213,7 +213,7 @@ service cloud.firestore {
         && onlyChanged(['name', 'timezone', 'deadlineLeadDays', 'defaultEscalationPolicyId',
                         'triageRoleKey', 'idgCadenceDays', 'missedVisitGraceMinutes',
                         'messageLifespanDays', 'deadlineLeadDaysByKind', 'missedVisitAlertMode',
-                        'defaultBereavementCoordinatorUid'])
+                        'defaultBereavementCoordinatorUid', 'patientChannelRetentionDays'])
         && isNonEmptyString(incoming().name, 200)
         && isNonEmptyString(incoming().timezone, 64)
         && incoming().deadlineLeadDays is int
@@ -228,6 +228,9 @@ service cloud.firestore {
         && isIntInRange(incoming().get('missedVisitGraceMinutes', 120), 15, 1440)
         && (incoming().get('messageLifespanDays', null) == null
             || isIntInRange(incoming().get('messageLifespanDays', null), 7, 3650))
+        // v3 (S6): patient channels are purged only with a retention of at least 6 years.
+        && (incoming().get('patientChannelRetentionDays', null) == null
+            || isIntInRange(incoming().get('patientChannelRetentionDays', null), 2190, 36500))
         // v3 settings (optional).
         && isLeadDaysByKind(incoming().get('deadlineLeadDaysByKind', {}))
         && incoming().get('missedVisitAlertMode', 'assignee_admins')
@@ -541,6 +544,13 @@ service cloud.firestore {
       match /idgMeetings/{meetingId} {
         allow read: if isStaffMember(orgId);
         allow write: if false;
+
+        // v3 (F5, H3): per-discipline notes and AI prep. Same audience as the
+        // meeting (staff, not volunteers); written only by functions.
+        match /notes/{noteId} {
+          allow read: if isStaffMember(orgId);
+          allow write: if false;
+        }
       }
 
       match /triageCalls/{callId} {
@@ -621,6 +631,27 @@ service cloud.firestore {
         allow update, delete: if false;
       }
 
+      // v3 (C2): `voidedAt`, `voidedBy`, `voidReason` on volunteerLogs are written only by the
+      // `voidVolunteerLog` function: create above lists every allowed key (so a client can't
+      // create a pre-voided log) and update/delete are denied.
+
+      // v3 (C2): paid patient-care hours override for the volunteer 5% report,
+      // `staffHours/{YYYY-MM}`. Admin or `reports` capability; exact shape
+      // {paidCareHours: number 0..100000, updatedBy: caller, updatedAt: request.time}.
+      // Client writes are audited by the `onStaffHoursWritten` trigger.
+      match /staffHours/{month} {
+        allow read: if hasCap(orgId, 'reports');
+        allow delete: if hasCap(orgId, 'reports') && month.matches('[0-9]{4}-(0[1-9]|1[0-2])');
+        allow create, update: if hasCap(orgId, 'reports')
+          && month.matches('[0-9]{4}-(0[1-9]|1[0-2])')
+          && exactKeys(['paidCareHours', 'updatedBy', 'updatedAt'])
+          && (incoming().paidCareHours is int || incoming().paidCareHours is float)
+          && incoming().paidCareHours >= 0
+          && incoming().paidCareHours <= 100000
+          && incoming().updatedBy == request.auth.uid
+          && incoming().updatedAt == request.time;
+      }
+
       // -------------------------------------------------------------------
       // referrals/{referralId} — client creates the record, then uploads
       // the file; everything after that is server-side.
@@ -640,8 +671,8 @@ service cloud.firestore {
           && incoming().fileName != '.'
           && incoming().fileName != '..'
           && incoming().contentType is string
-          && (incoming().contentType == 'application/pdf'
-              || incoming().contentType.matches('image/.*'))
+          // v3 (I1): exactly REFERRAL_MIME_TYPES in shared/types.ts (what the extractor accepts).
+          && incoming().contentType in ['application/pdf', 'image/png', 'image/jpeg', 'image/webp', 'image/heic', 'image/heif']
           && incoming().storagePath == 'orgs/' + orgId + '/referrals/' + referralId + '/' + incoming().fileName
           && incoming().extracted == null
           && incoming().error == null
@@ -659,6 +690,17 @@ service cloud.firestore {
       // auditLogs/{id} — written only by Cloud Functions.
       // -------------------------------------------------------------------
       // v3: readable by admin or the `audit` capability.
+      // v3 (S6): originals of recalled messages (admin or `audit` capability).
+      match /messageRecalls/{recallId} {
+        allow read: if hasCap(orgId, 'audit');
+        allow write: if false;
+      }
+
+      // v3 (M4): per-user rate-limit buckets; functions only.
+      match /rateLimits/{bucketId} {
+        allow read, write: if false;
+      }
+
       match /auditLogs/{logId} {
         allow read: if hasCap(orgId, 'audit');
         allow write: if false;

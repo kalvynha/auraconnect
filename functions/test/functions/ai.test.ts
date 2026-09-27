@@ -203,11 +203,12 @@ describe('generateIdgPrep', () => {
 
   it('writes aiPrep for each agenda patient with the disclaimer and audits', async () => {
     const gen = fakeGenerator('PREP');
-    const res = await generateIdgPrepHandler(req({ orgId: ORG, meetingId: 'mt1' }, { uid: 'c' }), { generator: gen });
+    // v3 (H3): an admin may prep every agenda patient; prep is stored in the notes subcollection.
+    const res = await generateIdgPrepHandler(req({ orgId: ORG, meetingId: 'mt1' }, { uid: 'a', role: 'admin' }), { generator: gen });
     expect(res).toEqual({ generatedPatientIds: ['p1', 'p2'], failedPatientIds: [] });
-    const m = fakeDb.read<any>(meetingPath)!;
-    expect(m.aiPrep.p1).toMatchObject({ text: `PREP\n\n${AI_DISCLAIMER}`, model: 'gemini-test' });
-    expect(m.aiPrep.p1.generatedAt).toBeInstanceOf(Timestamp);
+    const prep = fakeDb.read<any>(`${meetingPath}/notes/p1_aiPrep`)!;
+    expect(prep).toMatchObject({ kind: 'ai_prep', patientId: 'p1', text: `PREP\n\n${AI_DISCLAIMER}`, model: 'gemini-test', generatedBy: 'a' });
+    expect(prep.generatedAt).toBeInstanceOf(Timestamp);
     expect(gen.calls[0]!.prompt).toContain('routine → GIP');
     expect(docsIn(`orgs/${ORG}/auditLogs`).find((l) => l.data.action === 'idg.ai_prep')?.data.metadata).toEqual({ model: 'gemini-test', generated: 2, failed: 0 });
   });

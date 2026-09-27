@@ -5,9 +5,18 @@ import { writeAudit } from '../lib/audit';
 import { parse, requireOrg } from '../lib/context';
 import { db, docRef, paths } from '../lib/db';
 import { id } from '../lib/schemas';
-import type { Alert, AlertActionRequest } from '../shared/types';
+import type { Alert, AlertActionRequest, TriageCall } from '../shared/types';
+import { carePaths } from '../lib/care';
 
-const schema = z.object({ orgId: id, alertId: id });
+const schema = z.object({
+  orgId: id,
+  alertId: id,
+  disposition: z.enum(['advice_given', 'visit_scheduled', 'visit_made', 'md_contacted', 'ems_911', 'other']).optional(),
+  dispositionNote: z.string().trim().max(4000).optional(),
+});
+
+/** O3: note recorded on a triage call resolved through its alert when none is given. */
+export const RESOLVED_FROM_ALERT_NOTE = 'Resolved from alert';
 
 function patientIdOf(alert: Alert): string | null {
   return alert.source.type === 'message' ? null : alert.source.patientId;
@@ -17,6 +26,8 @@ function patientIdOf(alert: Alert): string | null {
  * `ack`: open → acked (stops escalation). Acking an already-acked alert is a no-op.
  * `resolve`: open|acked → resolved. Resolving twice is a no-op.
  * Only a uid in `targetUids`, or an admin, may act.
+ * v3 (O3): resolving a `triage` alert also resolves the open triage call (disposition
+ * `other` and note "Resolved from alert" unless given).
  */
 export async function alertActionHandler(request: CallableRequest<AlertActionRequest>, action: 'ack' | 'resolve'): Promise<Record<string, never>> {
   const input = parse(schema, request.data);
@@ -30,6 +41,8 @@ export async function alertActionHandler(request: CallableRequest<AlertActionReq
     if (ctx.role !== 'admin' && !alert.targetUids.includes(ctx.uid)) {
       throw new HttpsError('permission-denied', 'You are not a recipient of this alert.');
     }
+    const callRef = action === 'resolve' && alert.source.type === 'triage' ? docRef(carePaths.triageCall(ctx.orgId, alert.source.callId)) : null;
+    const callSnap = callRef ? await tx.get(callRef) : null;
     if (action === 'ack') {
       if (alert.status === 'acked') return;
       if (alert.status !== 'open') throw new HttpsError('failed-precondition', 'Alert is already resolved.');
@@ -42,6 +55,22 @@ export async function alertActionHandler(request: CallableRequest<AlertActionReq
         update.ackedAt = FieldValue.serverTimestamp();
       }
       tx.update(ref, update);
+      const call = callSnap?.exists ? (callSnap.data() as TriageCall) : null;
+      if (callRef && call && call.status === 'open') {
+        const disposition = input.disposition ?? 'other';
+        tx.update(callRef, {
+          status: 'resolved',
+          disposition,
+          dispositionNote: input.dispositionNote || (input.disposition ? null : RESOLVED_FROM_ALERT_NOTE),
+          resolvedAt: FieldValue.serverTimestamp(),
+          resolvedBy: ctx.uid,
+        });
+        await writeAudit(
+          ctx.orgId,
+          { actorUid: ctx.uid, action: 'triage.resolve', resourceType: 'triageCall', resourceId: callRef.id, patientId: call.patientId, metadata: { disposition, via: 'alert' } },
+          tx,
+        );
+      }
     }
     await writeAudit(
       ctx.orgId,

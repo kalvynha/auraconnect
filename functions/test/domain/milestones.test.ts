@@ -40,7 +40,7 @@ describe('computeMilestones', () => {
     }
   });
 
-  it('starting period 3 uses 60 days and requires F2F before admission', () => {
+  it('starting period 3 (new admission) uses 60 days and a F2F due by admission + 2 (S4)', () => {
     const t = computeMilestones('2026-05-10', 3);
     expect(t.benefitPeriods[0]).toMatchObject({
       number: 3,
@@ -49,8 +49,9 @@ describe('computeMilestones', () => {
       lengthDays: 60,
       f2fRequired: true,
       f2fWindowStart: '2026-04-10',
-      f2fDueBy: '2026-05-09',
+      f2fDueBy: '2026-05-12',
     });
+    expect(t.benefitPeriods[1]).toMatchObject({ number: 4, start: '2026-07-09', f2fWindowStart: '2026-06-09', f2fDueBy: '2026-07-08' });
     expect(t.benefitPeriods.every((b) => b.lengthDays === 60 && b.f2fRequired)).toBe(true);
     expect(t.benefitPeriods.map((b) => b.number)).toEqual([3, 4, 5, 6, 7, 8]);
   });
@@ -89,20 +90,24 @@ describe('upcomingDeadlines', () => {
     ]);
   });
 
-  it('flags overdue items and drops those more than 30 days overdue', () => {
+  it('flags overdue items and keeps them with no look-back cap (S1)', () => {
     const d = upcomingDeadlines(m, '2026-01-07', 0);
     expect(d.find((x) => x.kind === 'noe')).toMatchObject({ overdue: true });
     const later = upcomingDeadlines(m, '2026-02-06', 0);
-    expect(later.find((x) => x.kind === 'noe')).toBeUndefined(); // 31 days overdue
+    expect(later.find((x) => x.kind === 'noe')).toMatchObject({ dueDate: '2026-01-06', overdue: true }); // 31 days overdue
     expect(later.find((x) => x.kind === 'hope_huv2')).toMatchObject({ dueDate: '2026-01-30', overdue: true });
+    const muchLater = upcomingDeadlines(m, '2026-12-01', 0);
+    expect(muchLater.find((x) => x.kind === 'noe')).toMatchObject({ overdue: true });
   });
 
   it('reports the next recert (period end) and next F2F', () => {
     const d = upcomingDeadlines(m, '2026-03-29', 3);
     expect(d.find((x) => x.kind === 'recert')).toMatchObject({ dueDate: '2026-03-31', key: 'recert:2026-03-31', overdue: false });
-    const f = upcomingDeadlines(m, '2026-06-27', 3);
+    const f = upcomingDeadlines(m, '2026-06-27', 3).filter((x) => !x.overdue);
     expect(f.find((x) => x.kind === 'f2f')).toMatchObject({ dueDate: '2026-06-29' });
     expect(f.find((x) => x.kind === 'recert')).toMatchObject({ dueDate: '2026-06-29' });
+    // The unfiled period-1 recert stays overdue until it is completed.
+    expect(upcomingDeadlines(m, '2026-06-27', 3).find((x) => x.key === 'recert:2026-03-31')).toMatchObject({ overdue: true });
   });
 
   it('keeps reporting a just-missed recert as overdue', () => {
