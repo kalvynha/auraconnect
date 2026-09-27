@@ -40,7 +40,7 @@ async function ensureGroupChannel(orgId: string, name: string, members: string[]
 
 export async function sendRoleMessageHandler(request: CallableRequest<SendRoleMessageRequest>): Promise<SendRoleMessageResponse> {
   const input = parse(schema, request.data);
-  const ctx = requireOrg(request, input.orgId, WRITER_ROLES);
+  const ctx = await requireOrg(request, input.orgId, WRITER_ROLES);
 
   const sender = await getDocData<Member>(paths.member(ctx.orgId, ctx.uid));
   if (!sender?.active) throw new HttpsError('permission-denied', 'Your membership is not active.');

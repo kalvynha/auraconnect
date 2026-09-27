@@ -24,7 +24,7 @@ const schema = z
 
 export async function createAlertHandler(request: CallableRequest<CreateAlertRequest>): Promise<CreateAlertResponse> {
   const input = parse(schema, request.data);
-  const ctx = requireOrg(request, input.orgId, WRITER_ROLES);
+  const ctx = await requireOrg(request, input.orgId, WRITER_ROLES);
 
   let targets = [...(input.targetUids ?? [])];
   if (input.roleKey) {

@@ -287,8 +287,9 @@ describe('recordDeath (patient and care team read once)', () => {
     const tasks = docsIn(`orgs/${ORG}/tasks`).filter((t) => t.data.source?.event === 'death');
     expect(tasks.find((t) => t.data.discipline === 'SW')!.data.assigneeUid).toBe('s');
     expect(tasks.find((t) => t.data.discipline === 'RN')!.data.assigneeUid).toBe('c');
-    // patient + 2 members + template, then the transaction (patient, channel, visits and tasks queries).
-    expect(fakeDb.reads).toBeLessThanOrEqual(1 + 2 + 1 + 1 + 1 + 1 + 6);
+    // caller's member doc (requireOrg), patient + 2 members + template, then the transaction
+    // (patient, channel, visits and tasks queries).
+    expect(fakeDb.reads).toBeLessThanOrEqual(1 + 1 + 2 + 1 + 1 + 1 + 1 + 6);
   });
 });
 

@@ -20,7 +20,7 @@ function patientIdOf(alert: Alert): string | null {
  */
 export async function alertActionHandler(request: CallableRequest<AlertActionRequest>, action: 'ack' | 'resolve'): Promise<Record<string, never>> {
   const input = parse(schema, request.data);
-  const ctx = requireOrg(request, input.orgId);
+  const ctx = await requireOrg(request, input.orgId);
   const ref = docRef(paths.alert(ctx.orgId, input.alertId));
 
   await db().runTransaction(async (tx) => {

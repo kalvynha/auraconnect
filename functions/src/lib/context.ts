@@ -1,7 +1,8 @@
 /** Auth/role guards and input validation for callables. */
 import { HttpsError, type CallableRequest } from 'firebase-functions/v2/https';
 import type { ZodType, ZodTypeDef } from 'zod';
-import type { Role } from '../shared/types';
+import type { Member, Role } from '../shared/types';
+import { getDocData, paths } from './db';
 
 export const WRITER_ROLES: readonly Role[] = ['admin', 'clinician', 'intake'];
 export const CLINICAL_ROLES: readonly Role[] = ['admin', 'clinician', 'intake'];
@@ -15,7 +16,10 @@ export interface AuthInfo {
 
 export interface OrgContext extends AuthInfo {
   orgId: string;
+  /** The caller's current role, read from their member doc (not the possibly stale token). */
   role: Role;
+  /** The caller's member doc, loaded on every call. */
+  member: Member;
 }
 
 type AuthLike = Pick<CallableRequest<unknown>, 'auth'>;
@@ -29,21 +33,28 @@ export function requireAuth(request: AuthLike): AuthInfo {
 }
 
 /**
- * Requires the caller to be signed in, belong to `orgId` (per custom claims)
- * and, when `roles` is given, hold one of them.
+ * Requires the caller to be signed in, belong to `orgId` and, when `roles` is
+ * given, hold one of them.
+ *
+ * Claims are only a first gate: ID tokens stay valid for up to an hour after a
+ * member is deactivated or demoted, so the member doc is re-read on every call
+ * and is authoritative for `active` and `role` (matching the security rules).
  */
-export function requireOrg(request: AuthLike, orgId: string, roles?: readonly Role[]): OrgContext {
+export async function requireOrg(request: AuthLike, orgId: string, roles?: readonly Role[]): Promise<OrgContext> {
   const info = requireAuth(request);
   const claimOrg = info.claims.orgId;
-  const claimRole = info.claims.role as Role | undefined;
-  if (typeof claimOrg !== 'string' || !claimRole) {
+  if (typeof claimOrg !== 'string' || !info.claims.role) {
     throw new HttpsError('permission-denied', 'You are not a member of an organization.');
   }
   if (claimOrg !== orgId) throw new HttpsError('permission-denied', 'Not a member of this organization.');
-  if (roles && !roles.includes(claimRole)) {
+  const member = await getDocData<Member>(paths.member(orgId, info.uid));
+  if (!member || member.active !== true) {
+    throw new HttpsError('permission-denied', 'Your membership is not active.');
+  }
+  if (roles && !roles.includes(member.role)) {
     throw new HttpsError('permission-denied', 'Your role does not allow this action.');
   }
-  return { ...info, orgId, role: claimRole };
+  return { ...info, orgId, role: member.role, member };
 }
 
 /** Validates `data` with a zod schema, mapping failures to `invalid-argument`. */

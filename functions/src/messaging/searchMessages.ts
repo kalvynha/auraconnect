@@ -143,7 +143,7 @@ async function inBatches<T, R>(items: readonly T[], size: number, fn: (t: T) => 
 
 export async function searchMessagesHandler(request: CallableRequest<SearchMessagesRequest>): Promise<SearchMessagesResponse> {
   const input = parse(schema, request.data);
-  const ctx = requireOrg(request, input.orgId);
+  const ctx = await requireOrg(request, input.orgId);
   const nowMs = Date.now();
   const sinceMs = nowMs - SEARCH_LOOKBACK_DAYS * 86_400_000;
   let truncated = false;

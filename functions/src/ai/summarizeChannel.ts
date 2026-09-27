@@ -35,7 +35,7 @@ Omit sections that have nothing to report. Never add information that is not in 
 
 export async function summarizeChannelHandler(request: CallableRequest<SummarizeChannelRequest>, deps: AiDeps = {}): Promise<AiTextResult> {
   const input = parse(schema, request.data);
-  const ctx = requireOrg(request, input.orgId);
+  const ctx = await requireOrg(request, input.orgId);
 
   const channel = await getDocData<Channel>(paths.channel(ctx.orgId, input.channelId));
   if (!channel) throw new HttpsError('not-found', 'Channel not found.');

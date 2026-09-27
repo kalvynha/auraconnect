@@ -25,7 +25,7 @@ function sameInstant(a: TimestampLike | null | undefined, b: TimestampLike | nul
 
 export async function recallMessageHandler(request: CallableRequest<RecallMessageRequest>): Promise<Record<string, never>> {
   const input = parse(schema, request.data);
-  const ctx = requireOrg(request, input.orgId, WRITER_ROLES);
+  const ctx = await requireOrg(request, input.orgId, WRITER_ROLES);
   const channelRef = docRef(paths.channel(ctx.orgId, input.channelId));
   const msgRef = docRef(paths.message(ctx.orgId, input.channelId, input.messageId));
 

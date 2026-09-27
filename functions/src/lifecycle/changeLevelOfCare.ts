@@ -25,7 +25,7 @@ const schema = z.object({
 
 export async function changeLevelOfCareHandler(request: CallableRequest<ChangeLevelOfCareRequest>): Promise<Record<string, never>> {
   const input = parse(schema, request.data);
-  const ctx = requireOrg(request, input.orgId, CLINICAL_ROLES);
+  const ctx = await requireOrg(request, input.orgId, CLINICAL_ROLES);
   await db().runTransaction(async (tx) => {
     const { ref, patient } = await txPatient(tx, ctx.orgId, input.patientId);
     if (patient.status !== 'admitted') throw new HttpsError('failed-precondition', 'Only admitted patients have a level of care.');

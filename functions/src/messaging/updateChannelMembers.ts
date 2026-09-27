@@ -14,7 +14,7 @@ const schema = z
 
 export async function updateChannelMembersHandler(request: CallableRequest<UpdateChannelMembersRequest>): Promise<Record<string, never>> {
   const input = parse(schema, request.data);
-  const ctx = requireOrg(request, input.orgId, WRITER_ROLES);
+  const ctx = await requireOrg(request, input.orgId, WRITER_ROLES);
   if (input.add.length) await assertActiveMembers(ctx.orgId, input.add);
   const ref = docRef(paths.channel(ctx.orgId, input.channelId));
 

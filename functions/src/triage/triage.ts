@@ -64,7 +64,7 @@ const resolveSchema = z.object({
 
 export async function logTriageCallHandler(request: CallableRequest<LogTriageCallRequest>): Promise<LogTriageCallResponse> {
   const input = parse(logSchema, request.data);
-  const ctx = requireOrg(request, input.orgId, CLINICAL_ROLES);
+  const ctx = await requireOrg(request, input.orgId, CLINICAL_ROLES);
   const org = await requireOrgDoc(ctx.orgId);
 
   let patientName: string | null = null;
@@ -150,7 +150,7 @@ export async function logTriageCallHandler(request: CallableRequest<LogTriageCal
 
 export async function assignTriageCallHandler(request: CallableRequest<AssignTriageCallRequest>): Promise<Record<string, never>> {
   const input = parse(assignSchema, request.data);
-  const ctx = requireOrg(request, input.orgId, CLINICAL_ROLES);
+  const ctx = await requireOrg(request, input.orgId, CLINICAL_ROLES);
   await assertActiveMembers(ctx.orgId, [input.assignedUid]);
   const ref = docRef(carePaths.triageCall(ctx.orgId, input.callId));
   await db().runTransaction(async (tx) => {
@@ -177,7 +177,7 @@ export async function assignTriageCallHandler(request: CallableRequest<AssignTri
 
 export async function resolveTriageCallHandler(request: CallableRequest<ResolveTriageCallRequest>): Promise<Record<string, never>> {
   const input = parse(resolveSchema, request.data);
-  const ctx = requireOrg(request, input.orgId, CLINICAL_ROLES);
+  const ctx = await requireOrg(request, input.orgId, CLINICAL_ROLES);
   if (input.followUpTask?.assigneeUid) await assertActiveMembers(ctx.orgId, [input.followUpTask.assigneeUid]);
   const ref = docRef(carePaths.triageCall(ctx.orgId, input.callId));
   await db().runTransaction(async (tx) => {

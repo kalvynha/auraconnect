@@ -122,7 +122,7 @@ async function endOfCare(p: EndOfCare): Promise<void> {
 
 export async function dischargePatientHandler(request: CallableRequest<DischargePatientRequest>): Promise<Record<string, never>> {
   const input = parse(dischargeSchema, request.data);
-  const ctx = requireOrg(request, input.orgId, CLINICAL_ROLES);
+  const ctx = await requireOrg(request, input.orgId, CLINICAL_ROLES);
   await endOfCare({
     ctx,
     patientId: input.patientId,
@@ -143,7 +143,7 @@ export async function dischargePatientHandler(request: CallableRequest<Discharge
 
 export async function recordDeathHandler(request: CallableRequest<RecordDeathRequest>): Promise<Record<string, never>> {
   const input = parse(deathSchema, request.data);
-  const ctx = requireOrg(request, input.orgId, CLINICAL_ROLES);
+  const ctx = await requireOrg(request, input.orgId, CLINICAL_ROLES);
   let assignee: string | null = input.bereavementAssigneeUid ?? null;
   let preloaded: EndOfCare['preloaded'];
   if (assignee) {

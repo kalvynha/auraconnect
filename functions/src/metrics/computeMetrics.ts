@@ -65,7 +65,7 @@ const schema = z.object({ orgId: id });
 
 export async function computeMetricsHandler(request: CallableRequest<ComputeMetricsRequest>): Promise<ComputeMetricsResponse> {
   const input = parse(schema, request.data);
-  const ctx = requireOrg(request, input.orgId, ['admin']);
+  const ctx = await requireOrg(request, input.orgId, ['admin']);
   const org = await getDocData<Org>(paths.org(ctx.orgId));
   const tz = org?.timezone ?? 'UTC';
   const today = localDateParts(new Date(), tz).date;

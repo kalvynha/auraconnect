@@ -51,7 +51,7 @@ export async function acceptReferralHandler(
   deps: { statFile?: FileStat } = {},
 ): Promise<AcceptReferralResponse> {
   const input = parse(acceptSchema, request.data);
-  const ctx = requireOrg(request, input.orgId, CLINICAL_ROLES);
+  const ctx = await requireOrg(request, input.orgId, CLINICAL_ROLES);
   const ref = docRef(paths.referral(ctx.orgId, input.referralId));
   // Storage metadata is read before the transaction (no I/O inside it besides Firestore).
   const pre = await ref.get();
@@ -111,7 +111,7 @@ export async function acceptReferralHandler(
 
 export async function rejectReferralHandler(request: CallableRequest<RejectReferralRequest>): Promise<Record<string, never>> {
   const input = parse(rejectSchema, request.data);
-  const ctx = requireOrg(request, input.orgId, CLINICAL_ROLES);
+  const ctx = await requireOrg(request, input.orgId, CLINICAL_ROLES);
   const ref = docRef(paths.referral(ctx.orgId, input.referralId));
   await db().runTransaction(async (tx) => {
     const snap = await tx.get(ref);
@@ -130,7 +130,7 @@ export async function retryReferralExtractionHandler(
   deps: RunExtractionDeps = {},
 ): Promise<Record<string, never>> {
   const input = parse(retrySchema, request.data);
-  const ctx = requireOrg(request, input.orgId, CLINICAL_ROLES);
+  const ctx = await requireOrg(request, input.orgId, CLINICAL_ROLES);
   const snap = await docRef(paths.referral(ctx.orgId, input.referralId)).get();
   if (!snap.exists) throw new HttpsError('not-found', 'Referral not found.');
   const status = (snap.data() as Referral).status;

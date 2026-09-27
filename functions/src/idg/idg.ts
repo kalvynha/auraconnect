@@ -86,7 +86,7 @@ export async function autoAgenda(orgId: string, meetingDate: string, cadenceDays
 
 export async function createIdgMeetingHandler(request: CallableRequest<CreateIdgMeetingRequest>): Promise<IdResponse> {
   const input = parse(createSchema, request.data);
-  const ctx = requireOrg(request, input.orgId, CLINICAL_ROLES);
+  const ctx = await requireOrg(request, input.orgId, CLINICAL_ROLES);
   const org = await requireOrgDoc(ctx.orgId);
   const settings = orgSettings(org);
   const scheduledAt = instant(input.scheduledAt);
@@ -138,7 +138,7 @@ function assertScheduled(m: IdgMeeting): void {
 
 export async function updateIdgMeetingHandler(request: CallableRequest<UpdateIdgMeetingRequest>): Promise<Record<string, never>> {
   const input = parse(updateSchema, request.data);
-  const ctx = requireOrg(request, input.orgId, CLINICAL_ROLES);
+  const ctx = await requireOrg(request, input.orgId, CLINICAL_ROLES);
   const attendees = input.attendeeUids ? normalizeUids(input.attendeeUids) : undefined;
   if (attendees) await assertActiveMembers(ctx.orgId, attendees);
   const names = input.patientIds ? await agendaNames(ctx.orgId, input.patientIds) : undefined;
@@ -176,7 +176,7 @@ export async function updateIdgMeetingHandler(request: CallableRequest<UpdateIdg
 /** Allowed for attendees, the patient's care team and admins. */
 export async function saveIdgNoteHandler(request: CallableRequest<SaveIdgNoteRequest>): Promise<Record<string, never>> {
   const input = parse(noteSchema, request.data);
-  const ctx = requireOrg(request, input.orgId, CLINICAL_ROLES);
+  const ctx = await requireOrg(request, input.orgId, CLINICAL_ROLES);
   const assignees = input.actionItems.map((a) => a.assigneeUid).filter((u): u is string => !!u);
   if (assignees.length) await assertActiveMembers(ctx.orgId, assignees);
   const ref = docRef(carePaths.idgMeeting(ctx.orgId, input.meetingId));
@@ -225,7 +225,7 @@ export async function saveIdgNoteHandler(request: CallableRequest<SaveIdgNoteReq
  */
 export async function completeIdgMeetingHandler(request: CallableRequest<CompleteIdgMeetingRequest>): Promise<Record<string, never>> {
   const input = parse(completeSchema, request.data);
-  const ctx = requireOrg(request, input.orgId, CLINICAL_ROLES);
+  const ctx = await requireOrg(request, input.orgId, CLINICAL_ROLES);
   const settings = orgSettings(await requireOrgDoc(ctx.orgId));
   const ref = docRef(carePaths.idgMeeting(ctx.orgId, input.meetingId));
 

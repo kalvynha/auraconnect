@@ -27,7 +27,7 @@ const planSchema = z.object({
 
 export async function updateBereavementContactHandler(request: CallableRequest<UpdateBereavementContactRequest>): Promise<Record<string, never>> {
   const input = parse(contactSchema, request.data);
-  const ctx = requireOrg(request, input.orgId, CLINICAL_ROLES);
+  const ctx = await requireOrg(request, input.orgId, CLINICAL_ROLES);
   const ref = docRef(carePaths.bereavementPlan(ctx.orgId, input.planId));
   await db().runTransaction(async (tx) => {
     const snap = await tx.get(ref);
@@ -66,7 +66,7 @@ export async function updateBereavementContactHandler(request: CallableRequest<U
 
 export async function updateBereavementPlanHandler(request: CallableRequest<UpdateBereavementPlanRequest>): Promise<Record<string, never>> {
   const input = parse(planSchema, request.data);
-  const ctx = requireOrg(request, input.orgId, CLINICAL_ROLES);
+  const ctx = await requireOrg(request, input.orgId, CLINICAL_ROLES);
   if (input.assignedUid) await assertActiveMembers(ctx.orgId, [input.assignedUid]);
   const ref = docRef(carePaths.bereavementPlan(ctx.orgId, input.planId));
   await db().runTransaction(async (tx) => {

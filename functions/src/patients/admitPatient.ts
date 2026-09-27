@@ -27,7 +27,7 @@ const schema = z.object({
 
 export async function admitPatientHandler(request: CallableRequest<AdmitPatientRequest>): Promise<AdmitPatientResponse> {
   const input = parse(schema, request.data);
-  const ctx = requireOrg(request, input.orgId, CLINICAL_ROLES);
+  const ctx = await requireOrg(request, input.orgId, CLINICAL_ROLES);
   if (!input.consents.electionStatement || !input.consents.hipaaNotice) {
     throw new HttpsError('invalid-argument', 'The election statement and HIPAA notice must be signed before admission.');
   }

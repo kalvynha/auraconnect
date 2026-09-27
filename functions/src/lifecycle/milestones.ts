@@ -23,7 +23,7 @@ export function completionValue(completedBy: string, note: string | null) {
 
 export async function completeMilestoneHandler(request: CallableRequest<CompleteMilestoneRequest>): Promise<Record<string, never>> {
   const input = parse(completeSchema, request.data);
-  const ctx = requireOrg(request, input.orgId, CLINICAL_ROLES);
+  const ctx = await requireOrg(request, input.orgId, CLINICAL_ROLES);
   await db().runTransaction(async (tx) => {
     const { ref, patient } = await txPatient(tx, ctx.orgId, input.patientId);
     if (!patient.milestones) throw new HttpsError('failed-precondition', 'The patient has no milestones yet.');
@@ -46,7 +46,7 @@ export async function completeMilestoneHandler(request: CallableRequest<Complete
 
 export async function reopenMilestoneHandler(request: CallableRequest<ReopenMilestoneRequest>): Promise<Record<string, never>> {
   const input = parse(reopenSchema, request.data);
-  const ctx = requireOrg(request, input.orgId, CLINICAL_ROLES);
+  const ctx = await requireOrg(request, input.orgId, CLINICAL_ROLES);
   await db().runTransaction(async (tx) => {
     const { ref, patient } = await txPatient(tx, ctx.orgId, input.patientId);
     if (!patient.milestoneCompletions?.[input.key]) return;

@@ -56,7 +56,7 @@ export async function ensureDirectChannel(orgId: string, a: string, b: string, c
 
 export async function createChannelHandler(request: CallableRequest<CreateChannelRequest>): Promise<CreateChannelResponse> {
   const input = parse(schema, request.data);
-  const ctx = requireOrg(request, input.orgId, WRITER_ROLES);
+  const ctx = await requireOrg(request, input.orgId, WRITER_ROLES);
 
   let members = [...input.memberUids];
   let teamId: string | null = null;

@@ -73,7 +73,7 @@ export async function resolveBroadcastRecipients(orgId: string, t: BroadcastTarg
 
 export async function sendBroadcastHandler(request: CallableRequest<SendBroadcastRequest>): Promise<SendBroadcastResponse> {
   const input = parse(schema, request.data);
-  const ctx = requireOrg(request, input.orgId, WRITER_ROLES);
+  const ctx = await requireOrg(request, input.orgId, WRITER_ROLES);
 
   const sender = await getDocData<Member>(paths.member(ctx.orgId, ctx.uid));
   if (!sender?.active) throw new HttpsError('permission-denied', 'Your membership is not active.');

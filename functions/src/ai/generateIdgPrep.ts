@@ -52,7 +52,7 @@ Keep it under 300 words.`;
 
 export async function generateIdgPrepHandler(request: CallableRequest<GenerateIdgPrepRequest>, deps: AiDeps = {}): Promise<GenerateIdgPrepResponse> {
   const input = parse(schema, request.data);
-  const ctx = requireOrg(request, input.orgId, CLINICAL_ROLES);
+  const ctx = await requireOrg(request, input.orgId, CLINICAL_ROLES);
 
   const meetingPath = `${paths.org(ctx.orgId)}/idgMeetings/${input.meetingId}`;
   const meeting = await getDocData<IdgMeeting>(meetingPath);

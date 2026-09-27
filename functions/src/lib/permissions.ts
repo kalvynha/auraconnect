@@ -27,7 +27,7 @@ export function memberIsLicensed(member: Pick<Member, 'role' | 'discipline'>): b
 
 /** Throws unless the caller is an admin or holds `cap`. Returns the caller's member doc. */
 export async function requireCapability(ctx: OrgContext, cap: Capability): Promise<Member> {
-  const member = await loadCallerMember(ctx);
+  const member = ctx.member ?? (await loadCallerMember(ctx));
   if (!memberHasCapability(member, cap)) {
     throw new HttpsError('permission-denied', `This action needs the "${cap}" permission.`);
   }
@@ -36,7 +36,7 @@ export async function requireCapability(ctx: OrgContext, cap: Capability): Promi
 
 /** Throws unless the caller is an admin or an RN/NP/MD. Returns the caller's member doc. */
 export async function requireLicensed(ctx: OrgContext): Promise<Member> {
-  const member = await loadCallerMember(ctx);
+  const member = ctx.member ?? (await loadCallerMember(ctx));
   if (!memberIsLicensed(member)) {
     throw new HttpsError('permission-denied', 'Only an RN, NP, MD or administrator can do this.');
   }

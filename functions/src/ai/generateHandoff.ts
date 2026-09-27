@@ -41,7 +41,7 @@ Do not rank or compare patients' prognoses. Do not invent vitals, doses or event
 
 export async function generateHandoffHandler(request: CallableRequest<GenerateHandoffRequest>, deps: AiDeps = {}): Promise<AiTextResult> {
   const input = parse(schema, request.data);
-  const ctx = requireOrg(request, input.orgId);
+  const ctx = await requireOrg(request, input.orgId);
 
   let patients: Array<{ id: string; p: Patient }>;
   if (input.patientIds) {

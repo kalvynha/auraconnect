@@ -48,7 +48,7 @@ const templateSchema = z.object({
 
 export async function createTaskHandler(request: CallableRequest<CreateTaskRequest>): Promise<IdResponse> {
   const input = parse(createSchema, request.data);
-  const ctx = requireOrg(request, input.orgId, CLINICAL_ROLES);
+  const ctx = await requireOrg(request, input.orgId, CLINICAL_ROLES);
   if (input.assigneeUid) await assertActiveMembers(ctx.orgId, [input.assigneeUid]);
   let patientName: string | null = null;
   if (input.patientId) {
@@ -85,7 +85,7 @@ export async function createTaskHandler(request: CallableRequest<CreateTaskReque
 /** The creator, the assignee, the patient's care team or an admin may update a task. */
 export async function updateTaskHandler(request: CallableRequest<UpdateTaskRequest>): Promise<Record<string, never>> {
   const input = parse(updateSchema, request.data);
-  const ctx = requireOrg(request, input.orgId, CLINICAL_ROLES);
+  const ctx = await requireOrg(request, input.orgId, CLINICAL_ROLES);
   if (input.assigneeUid) await assertActiveMembers(ctx.orgId, [input.assigneeUid]);
   const ref = docRef(carePaths.task(ctx.orgId, input.taskId));
   await db().runTransaction(async (tx) => {
@@ -135,7 +135,7 @@ export async function updateTaskHandler(request: CallableRequest<UpdateTaskReque
 
 export async function saveTaskTemplateHandler(request: CallableRequest<SaveTaskTemplateRequest>): Promise<Record<string, never>> {
   const input = parse(templateSchema, request.data);
-  const ctx = requireOrg(request, input.orgId, ['admin']);
+  const ctx = await requireOrg(request, input.orgId, ['admin']);
   const batch = db().batch();
   batch.set(docRef(carePaths.taskTemplate(ctx.orgId, input.event)), { event: input.event, items: input.items });
   // No dedicated AuditAction exists for templates; recorded as a task update on the template resource.

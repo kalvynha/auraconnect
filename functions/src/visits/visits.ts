@@ -62,7 +62,7 @@ function assertSpan(start: Timestamp, end: Timestamp): void {
 
 export async function setVisitFrequenciesHandler(request: CallableRequest<SetVisitFrequenciesRequest>): Promise<Record<string, never>> {
   const input = parse(frequenciesSchema, request.data);
-  const ctx = requireOrg(request, input.orgId, CLINICAL_ROLES);
+  const ctx = await requireOrg(request, input.orgId, CLINICAL_ROLES);
   await db().runTransaction(async (tx) => {
     const { ref, patient } = await txPatient(tx, ctx.orgId, input.patientId);
     if (patient.status !== 'admitted' && patient.status !== 'referral') {
@@ -87,7 +87,7 @@ export async function setVisitFrequenciesHandler(request: CallableRequest<SetVis
 
 export async function scheduleVisitHandler(request: CallableRequest<ScheduleVisitRequest>): Promise<IdResponse> {
   const input = parse(scheduleSchema, request.data);
-  const ctx = requireOrg(request, input.orgId, CLINICAL_ROLES);
+  const ctx = await requireOrg(request, input.orgId, CLINICAL_ROLES);
   const start = instant(input.start);
   const end = instant(input.end);
   assertSpan(start, end);
@@ -142,7 +142,7 @@ async function txVisitForAction(tx: Transaction, ctx: OrgContext, visitId: strin
 
 export async function updateVisitHandler(request: CallableRequest<UpdateVisitRequest>): Promise<Record<string, never>> {
   const input = parse(updateSchema, request.data);
-  const ctx = requireOrg(request, input.orgId, CLINICAL_ROLES);
+  const ctx = await requireOrg(request, input.orgId, CLINICAL_ROLES);
   if (input.assignedUid) await assertActiveMembers(ctx.orgId, [input.assignedUid]);
   await db().runTransaction(async (tx) => {
     const { ref, visit } = await txVisitForAction(tx, ctx, input.visitId);
@@ -171,7 +171,7 @@ export async function updateVisitHandler(request: CallableRequest<UpdateVisitReq
 
 export async function completeVisitHandler(request: CallableRequest<CompleteVisitRequest>): Promise<Record<string, never>> {
   const input = parse(completeSchema, request.data);
-  const ctx = requireOrg(request, input.orgId, CLINICAL_ROLES);
+  const ctx = await requireOrg(request, input.orgId, CLINICAL_ROLES);
   await db().runTransaction(async (tx) => {
     const { ref, visit } = await txVisitForAction(tx, ctx, input.visitId);
     if (visit.status === 'completed') return;
@@ -198,7 +198,7 @@ export async function completeVisitHandler(request: CallableRequest<CompleteVisi
 
 export async function cancelVisitHandler(request: CallableRequest<CancelVisitRequest>): Promise<Record<string, never>> {
   const input = parse(cancelSchema, request.data);
-  const ctx = requireOrg(request, input.orgId, CLINICAL_ROLES);
+  const ctx = await requireOrg(request, input.orgId, CLINICAL_ROLES);
   await db().runTransaction(async (tx) => {
     const { ref, visit } = await txVisitForAction(tx, ctx, input.visitId);
     if (visit.status === 'cancelled') return;

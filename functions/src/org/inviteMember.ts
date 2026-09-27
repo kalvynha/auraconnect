@@ -18,7 +18,7 @@ const schema = z.object({
 
 export async function inviteMemberHandler(request: CallableRequest<InviteMemberRequest>): Promise<InviteMemberResponse> {
   const input = parse(schema, request.data);
-  const ctx = requireOrg(request, input.orgId, ['admin']);
+  const ctx = await requireOrg(request, input.orgId, ['admin']);
   const teamIds = [...new Set(input.teamIds ?? [])];
   if (teamIds.length) {
     const teams = await getMany<Team>(teamIds.map((t) => paths.team(ctx.orgId, t)));

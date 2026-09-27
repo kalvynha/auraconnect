@@ -31,7 +31,7 @@ const schema = z.object({
  */
 export async function recordRecertificationHandler(request: CallableRequest<RecordRecertificationRequest>): Promise<Record<string, never>> {
   const input = parse(schema, request.data);
-  const ctx = requireOrg(request, input.orgId, CLINICAL_ROLES);
+  const ctx = await requireOrg(request, input.orgId, CLINICAL_ROLES);
   const pre = await loadPatient(ctx.orgId, input.patientId);
   const tasks = await prepareTemplateTasks(ctx.orgId, 'recertification', input.certificationDate, pre.careTeamUids ?? []);
 
