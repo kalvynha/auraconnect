@@ -251,9 +251,9 @@ private struct ThreadContent: View {
             }
         )
         .contextMenu {
-            if !message.isRecalled && !message.text.isEmpty {
+            if !message.isRecalled && !message.displayText.isEmpty {
                 Button {
-                    SecurePasteboard.copy(message.text)
+                    SecurePasteboard.copy(message.displayText)
                 } label: {
                     Label("Copy", systemImage: "doc.on.doc")
                 }

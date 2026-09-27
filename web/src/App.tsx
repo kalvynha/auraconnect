@@ -33,6 +33,10 @@ import VolunteersPage from './pages/Volunteers';
 import SettingsPage from './pages/Settings';
 import ComplianceReportPage from './pages/ComplianceReport';
 import CensusReportPage from './pages/CensusReport';
+import TemplatesPage from './pages/Templates';
+import DirectoryPage from './pages/Directory';
+import MyNotificationsPage from './pages/MyNotifications';
+import { PushToasts } from './components/PushToasts';
 
 interface NavItem {
   to: string;
@@ -46,6 +50,10 @@ const NAV: NavItem[] = [
   { to: '/', label: 'Dashboard' },
   { to: '/messages', label: 'Messages' },
   { to: '/alerts', label: 'Alerts' },
+  { to: '/directory', label: 'Directory' },
+  // v4: staff templates (admins manage the org's; everyone has personal ones).
+  { to: '/templates', label: 'Message templates', show: (s) => s.isAdmin || s.member?.discipline !== 'Volunteer' },
+  { to: '/notifications', label: 'My notifications' },
   { to: '/patients', label: 'Patients' },
   { to: '/visits', label: 'Visits' },
   { to: '/tasks', label: 'Tasks' },
@@ -105,6 +113,7 @@ function Layout() {
         )}
         <Outlet />
       </main>
+      <PushToasts />
     </div>
   );
 }
@@ -165,6 +174,9 @@ export default function App() {
         <Route path="messages" element={<MessagesPage />} />
         <Route path="messages/:channelId" element={<MessagesPage />} />
         <Route path="alerts" element={<AlertsPage />} />
+        <Route path="directory" element={<DirectoryPage />} />
+        <Route path="templates" element={<TemplatesPage />} />
+        <Route path="notifications" element={<MyNotificationsPage />} />
         <Route path="patients" element={<PatientsPage />} />
         <Route path="patients/new" element={<RequireRole roles={INTAKE_ROLES}><AdmitWizardPage /></RequireRole>} />
         <Route path="patients/:patientId" element={<PatientDetailPage />} />

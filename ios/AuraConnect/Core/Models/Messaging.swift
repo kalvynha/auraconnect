@@ -36,6 +36,13 @@ struct Channel: Codable, Identifiable {
     var lastMessage: LastMessage?
     var lastMessageAt: Date?
     var archived: Bool?
+    // v4 (server-written; optional on read)
+    /// Pinned messages (max 10), newest first.
+    var pinned: [PinnedMessage]?
+    /// Broadcast channels only: recipients must acknowledge with `acks/{uid}`.
+    var requireAck: Bool?
+    /// Short description shown in the channel info sheet.
+    var description: String?
 
     var members: [String] { memberUids ?? [] }
     var channelType: ChannelType { type ?? .group }
@@ -97,6 +104,17 @@ struct Message: Codable, Identifiable {
     var lastReplyAt: Date?
     /// Set by `recallMessage`; body and attachments are then empty.
     var recalledAt: Date?
+    // v4 (backend-written; the client create shape is unchanged)
+    /// Member uids @mentioned in the body (includes resolved on-call roles).
+    var mentions: [String]?
+    /// On-call role keys @mentioned.
+    var mentionRoles: [String]?
+    /// Set by `editMessage`.
+    var editedAt: Date?
+    /// Set by `onMessageCreated` from a leading `[[tpl:{id}]]` marker.
+    var templateId: String?
+    /// Aggregate reaction counts, e.g. ["👍": 3].
+    var reactionCounts: [String: Int]?
 
     var text: String { body ?? "" }
     var messagePriority: Priority { priority ?? .normal }
@@ -104,6 +122,17 @@ struct Message: Codable, Identifiable {
     var isRecalled: Bool { recalledAt != nil }
     var isThreadReply: Bool { threadParentId?.nilIfBlank != nil }
     var replies: Int { replyCount ?? 0 }
+    var isEdited: Bool { editedAt != nil }
+    /// Text to show: a template marker not yet stripped by the backend is hidden.
+    var displayText: String { MessageTemplate.strippingMarker(text) }
+    /// Non-zero reaction counts in `ALLOWED_REACTIONS` order (unknown emoji last).
+    var sortedReactions: [ReactionCount] {
+        let counts = (reactionCounts ?? [:]).filter { $0.value > 0 }
+        return counts.keys
+            .sorted { (ALLOWED_REACTIONS.firstIndex(of: $0) ?? 99, $0) < (ALLOWED_REACTIONS.firstIndex(of: $1) ?? 99, $1) }
+            .map { ReactionCount(emoji: $0, count: counts[$0] ?? 0) }
+    }
+    func isMentioning(_ uid: String) -> Bool { (mentions ?? []).contains(uid) }
 }
 
 /// `orgs/{orgId}/channels/{channelId}/reads/{uid}` (document id == uid).

@@ -91,6 +91,9 @@ struct SettingsView: View {
 
             Section {
                 LabeledContent("Status", value: notificationStatusText)
+                NavigationLink(value: Route.notificationSettings) {
+                    Text("Quiet hours and delivery")
+                }
                 Button("Open notification settings") {
                     if let url = URL(string: UIApplication.openNotificationSettingsURLString) {
                         openURL(url)

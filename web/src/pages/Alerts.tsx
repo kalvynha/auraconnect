@@ -8,6 +8,7 @@ import type {
   CreateAlertRequest,
   CreateAlertResponse,
   EscalationPolicy,
+  MessageTemplate,
   OnCallRole,
   Patient,
   Priority,
@@ -24,6 +25,8 @@ import { MILESTONE_LABELS } from '../lib/milestones';
 import { csvFileName, downloadCsv, toCsv } from '../lib/csv';
 import { patientName } from '../lib/patient';
 import { Badge, Button, Card, ErrorBanner, Field, MemberPicker, Modal, Page } from '../components/ui';
+import { QuickReplies } from '../components/messaging';
+import { useOrgTemplates } from '../lib/messaging';
 
 const PAGE_LIMIT = 200;
 
@@ -162,7 +165,7 @@ function TriageResolve({ callId, onDone, onFallback }: { callId: string; onDone:
   return <ResolveModal tc={call.data} onClose={onDone} />;
 }
 
-function AlertCard({ a }: { a: WithId<Alert> }) {
+function AlertCard({ a, templates }: { a: WithId<Alert>; templates: WithId<MessageTemplate>[] }) {
   const s = useOrgSession();
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -170,6 +173,12 @@ function AlertCard({ a }: { a: WithId<Alert> }) {
   const [resolvingCall, setResolvingCall] = useState(false);
   const canAct = s.isAdmin || a.targetUids.includes(s.user.uid);
   const triageCallId = a.source.type === 'triage' ? a.source.callId : null;
+  const [quick, setQuick] = useState(a.status === 'open');
+  // v4 quick replies: post a normal message in the source channel of an urgent/critical message alert.
+  const replyChannelId =
+    a.source.type === 'message' && a.priority !== 'normal' && a.status !== 'resolved' && s.role !== 'viewer' && a.targetUids.includes(s.user.uid)
+      ? a.source.channelId
+      : null;
 
   async function act(name: 'ackAlert' | 'resolveAlert') {
     setBusy(name);
@@ -214,6 +223,15 @@ function AlertCard({ a }: { a: WithId<Alert> }) {
             ))}
           </ol>
         )}
+        {replyChannelId && (
+          <div className="alert-quick">
+            {quick ? (
+              <QuickReplies channelId={replyChannelId} templates={templates} />
+            ) : (
+              <button type="button" className="link small" onClick={() => setQuick(true)}>Quick reply…</button>
+            )}
+          </div>
+        )}
         <ErrorBanner error={error} />
       </div>
       {canAct && a.status !== 'resolved' && (
@@ -247,6 +265,7 @@ export default function AlertsPage() {
   const [status, setStatus] = useState<AlertStatus | 'all'>('open');
   const [scope, setScope] = useState<'mine' | 'all'>(s.isAdmin ? 'all' : 'mine');
   const [creating, setCreating] = useState(false);
+  const templates = useOrgTemplates(s);
 
   // Server-side status filter: with 100s of resolved alerts, "limit then filter" hid open ones.
   const alerts = useLiveQuery<Alert>(
@@ -334,7 +353,7 @@ export default function AlertsPage() {
               <Button small variant="ghost" onClick={() => window.print()}>Print</Button>
             </div>
             <div className="alert-list">
-              {rows.map((a) => <AlertCard key={a.id} a={a} />)}
+              {rows.map((a) => <AlertCard key={a.id} a={a} templates={templates.data} />)}
             </div>
           </>
         )}

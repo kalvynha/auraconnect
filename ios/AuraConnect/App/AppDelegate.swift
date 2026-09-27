@@ -14,6 +14,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         FirebaseService.configure()
         SecureDownload.removeAll()
         UNUserNotificationCenter.current().delegate = self
+        // v4: lock-screen actions (Acknowledge / Reply / Mark read).
+        NotificationCategories.register()
         if FirebaseService.isConfigured {
             Messaging.messaging().delegate = self
         }
@@ -54,11 +56,30 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
     }
 
     /// Notification tap: deep-link to the chat or alert once the session is ready.
+    /// v4 lock-screen actions run in the background; the completion handler is called only
+    /// after the work finishes. When it can't be done (signed out, missing ids, write failed)
+    /// the deep link is queued so the conversation or alert opens with the app.
     nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
+        if let request = NotificationActionRequest(response: response) {
+            Task { @MainActor in
+                let backgroundTask = BackgroundTaskToken()
+                backgroundTask.begin(name: "AuraNotificationAction")
+                let outcome = await NotificationActionHandler.perform(request)
+                if outcome == .openApp {
+                    if let push = request.push {
+                        Router.shared.handleNotificationTap(push)
+                    }
+                    await NotificationActionHandler.postFallbackNotice(for: request)
+                }
+                completionHandler()
+                backgroundTask.end()
+            }
+            return
+        }
         let push = PushData(userInfo: response.notification.request.content.userInfo)
         if let push {
             Task { @MainActor in

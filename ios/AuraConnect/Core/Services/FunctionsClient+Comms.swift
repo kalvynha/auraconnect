@@ -35,14 +35,18 @@ extension FunctionsClient {
     }
 
     /// Admin. Creates a `broadcast` channel for the resolved recipients and posts the message.
-    func sendBroadcast(orgId: String, name: String, target: BroadcastTarget, body: String, priority: Priority) async throws -> BroadcastResult {
-        let response = try await call("sendBroadcast", [
+    /// v4: `requireAck` makes recipients acknowledge (`acks/{uid}`, report via `broadcastAckReport`).
+    func sendBroadcast(orgId: String, name: String, target: BroadcastTarget, body: String, priority: Priority,
+                       requireAck: Bool = false) async throws -> BroadcastResult {
+        var payload: [String: Any] = [
             "orgId": orgId,
             "name": name,
             "target": target.dictionary,
             "body": body,
             "priority": priority.rawValue,
-        ])
+        ]
+        if requireAck { payload["requireAck"] = true }
+        let response = try await call("sendBroadcast", payload)
         return BroadcastResult(
             channelId: try commsString("channelId", in: response, from: "sendBroadcast"),
             messageId: response["messageId"] as? String,

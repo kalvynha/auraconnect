@@ -133,6 +133,14 @@ struct RouteDestinationView: View {
             VisitDetailView(visitId: id)
         case .onCallSchedule:
             ScheduleView()
+        case .directory:
+            DirectoryView()
+        case .memberProfile(let uid):
+            MemberProfileView(uid: uid)
+        case .myStatus:
+            MyStatusView()
+        case .notificationSettings:
+            NotificationSettingsView()
         }
     }
 }

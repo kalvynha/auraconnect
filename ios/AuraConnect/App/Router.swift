@@ -32,6 +32,11 @@ enum Route: Hashable {
     // v3 field usability
     case visit(String)
     case onCallSchedule
+    // v4 directory, presence and notifications
+    case directory
+    case memberProfile(String)
+    case myStatus
+    case notificationSettings
 }
 
 /// Holds tab selection and per-tab navigation paths so push notifications

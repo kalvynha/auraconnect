@@ -22,6 +22,8 @@ final class BroadcastDraft {
     var name = ""
     var body = ""
     var priority: Priority = .normal
+    /// v4: recipients must acknowledge the broadcast.
+    var requireAck = false
     private(set) var teams: [Team] = []
     private(set) var isWorking = false
     var errorMessage: String?
@@ -64,7 +66,7 @@ final class BroadcastDraft {
         defer { isWorking = false }
         do {
             let result = try await FunctionsClient().sendBroadcast(
-                orgId: orgId, name: name, target: target, body: body, priority: priority
+                orgId: orgId, name: name, target: target, body: body, priority: priority, requireAck: requireAck
             )
             return result.channelId
         } catch {
@@ -132,6 +134,7 @@ struct BroadcastSections: View {
             }
             TextField("Message", text: $draft.body, axis: .vertical)
                 .lineLimit(3...8)
+            Toggle("Require acknowledgement", isOn: $draft.requireAck)
         }
     }
 }

@@ -7,7 +7,7 @@ struct MoreView: View {
         List {
             Section {
                 HStack(spacing: 12) {
-                    AvatarView(initials: org.me?.initials ?? "?", size: 44)
+                    PresenceAvatar(member: org.me, size: 44)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(org.me?.name ?? org.myName).font(.headline)
                         Text([org.role.label, org.org?.name].compactMap { $0 }.joined(separator: " · "))
@@ -16,6 +16,10 @@ struct MoreView: View {
                     }
                 }
                 .padding(.vertical, 4)
+                // v4: my status (tap to change).
+                NavigationLink(value: Route.myStatus) {
+                    MyStatusSummaryRow(member: org.me)
+                }
             }
 
             Section("Care") {
@@ -45,6 +49,9 @@ struct MoreView: View {
             }
 
             Section("Coordination") {
+                NavigationLink(value: Route.directory) {
+                    Label("Directory", systemImage: "person.crop.rectangle.stack")
+                }
                 NavigationLink(value: Route.onCallSchedule) {
                     Label("On-call schedule", systemImage: "calendar")
                 }
@@ -74,6 +81,9 @@ struct MoreView: View {
             }
 
             Section {
+                NavigationLink(value: Route.notificationSettings) {
+                    Label("Notifications", systemImage: "bell.badge")
+                }
                 NavigationLink(value: Route.settings) {
                     Label("Settings", systemImage: "gearshape")
                 }
