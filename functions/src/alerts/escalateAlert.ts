@@ -33,7 +33,7 @@ export async function handleEscalation(payload: EscalationTaskPayload): Promise<
   const step = nextStep(policy, expectedLevel);
   let roleUids: string[] = [];
   if (pre.status === 'open' && step?.step.target.kind === 'role') {
-    roleUids = (await resolveOnCall(orgId, step.step.target.roleKey)).uids;
+    roleUids = (await resolveOnCall(orgId, step.step.target.roleKey, { availability: 'prefer' })).uids;
   }
 
   const decision = await db().runTransaction(async (tx) => {

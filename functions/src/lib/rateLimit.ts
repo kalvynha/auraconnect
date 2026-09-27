@@ -25,6 +25,8 @@ export const RATE_LIMITS = {
   generateIdgPrep: { capacity: 10, perMinute: 10 },
   sendBroadcast: { capacity: 10, perMinute: 10 },
   createAlert: { capacity: 10, perMinute: 10 },
+  /** v4: keyed per message (not per user): 1 nudge per message per 10 minutes. */
+  nudgeUnread: { capacity: 1, perMinute: 0.1 },
 } as const satisfies Record<string, RateLimitRule>;
 
 export type RateLimitedAction = keyof typeof RATE_LIMITS;
@@ -41,7 +43,11 @@ export function takeToken(bucket: Pick<RateLimitBucket, 'tokens' | 'refilledAtMs
   return available - 1;
 }
 
-/** Spends one token for `uid`/`action`; throws `resource-exhausted` when the bucket is empty. */
+/**
+ * Spends one token for `uid`/`action`; throws `resource-exhausted` when the bucket is empty.
+ * `uid` is the bucket's subject: usually the caller, but a per-resource limit may pass another key
+ * (v4 `nudgeUnread` uses `{channelId}_{messageId}`).
+ */
 export async function enforceRateLimit(orgId: string, uid: string, action: RateLimitedAction, now: Date = new Date()): Promise<void> {
   const rule = RATE_LIMITS[action];
   const ref = docRef(rateLimitPath(orgId, uid, action));

@@ -1,13 +1,21 @@
 import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 import { onDocumentCreated } from 'firebase-functions/v2/firestore';
 import { truncateText } from '../domain/channels';
+import { todayInTimeZone } from '../domain/dates';
+import { isOutOfOffice, outOfOfficeReply } from '../domain/delivery';
+import { mayContainMentions } from '../domain/mentions';
+import { stripTemplateMarker } from '../domain/templates';
 import { colRef, db, docRef, getDocData, paths } from '../lib/db';
 import { writeAudit } from '../lib/audit';
 import { logger } from 'firebase-functions/v2';
 import { messagePushTitle, pushToMembers } from '../lib/notify';
 import { raiseAlert } from '../alerts/raiseAlert';
-import type { Alert, Channel, Member, Message, TimestampLike } from '../shared/types';
+import { SYSTEM_SENDER_UID } from '../lifecycle/notifyCareTeam';
+import type { Alert, Channel, Member, Message, NoReplyReminder, Org, PushData, TimestampLike } from '../shared/types';
 import { FIRESTORE_TRIGGER_REGION } from '../lib/regions';
+import { filterRecipients, loadRecipientDocs, type RecipientDocs } from './delivery';
+import { EMPTY_MENTIONS, nonMemberNoteText, resolveMentions } from './mentions';
+import { isSilentSystemNote, postSilentNote, silentNoteId } from './systemNotes';
 
 function toMillis(t: TimestampLike | null | undefined): number {
   if (!t) return 0;
@@ -33,11 +41,25 @@ export function messageAlertId(channelId: string, messageId: string): string {
  * 3. Broadcast channels: only messages from the channel creator are fanned
  *    out, and they are pushed at their priority without an escalating alert
  *    (a broadcast is an announcement, not an ack-required page to everyone).
+ *
+ * v4:
+ *  - a leading `[[tpl:{id}]]` marker is stripped from the body and `templateId` set;
+ *  - @mentions are parsed into `mentions` / `mentionRoles` (role mentions → on call now); mentioned
+ *    people outside the channel get no push and the sender gets a silent system note;
+ *  - normal-priority pushes are filtered by channel prefs, quiet hours, off-shift quiet and out of
+ *    office (`messaging/delivery.ts`); urgent and critical always push;
+ *  - a DM to someone out of office gets a silent auto-reply (once per day per absence);
+ *  - a message from someone else cancels pending "remind me if no reply" reminders in the channel;
+ *  - silent system notes (`sysnote_*`) are ignored entirely.
  */
-export async function handleMessageCreated(orgId: string, channelId: string, messageId: string, message: Message): Promise<void> {
+export async function handleMessageCreated(orgId: string, channelId: string, messageId: string, message: Message, now: Date = new Date()): Promise<void> {
+  if (isSilentSystemNote(messageId, message)) return;
   const channelRef = docRef(paths.channel(orgId, channelId));
+  const msgRef = docRef(paths.message(orgId, channelId, messageId));
   const at = message.createdAt && toMillis(message.createdAt) > 0 ? message.createdAt : Timestamp.now();
-  const text = truncateText(message.body ?? '') || (message.attachments?.length ? 'Attachment' : '');
+  const stripped = stripTemplateMarker(message.body ?? '');
+  const body = stripped.body;
+  const text = truncateText(body) || (message.attachments?.length ? 'Attachment' : '');
   const parentId = typeof message.threadParentId === 'string' && message.threadParentId && message.threadParentId !== messageId ? message.threadParentId : null;
   const parentRef = parentId ? docRef(paths.message(orgId, channelId, parentId)) : null;
 
@@ -63,27 +85,106 @@ export async function handleMessageCreated(orgId: string, channelId: string, mes
     return c;
   });
   if (!channel) return;
+  const fromSystem = message.senderUid === SYSTEM_SENDER_UID;
 
-  // O2: posting in a channel acknowledges the sender's own open alerts for urgent messages there.
-  try {
-    await ackMessageAlertsOnReply(orgId, channelId, message.senderUid);
-  } catch (e) {
-    logger.warn('auto-ack on reply failed', { orgId, code: (e as { code?: unknown })?.code ?? (e as Error)?.name ?? 'unknown' });
+  if (!fromSystem) {
+    // O2: posting in a channel acknowledges the sender's own open alerts for urgent messages there.
+    try {
+      await ackMessageAlertsOnReply(orgId, channelId, message.senderUid);
+    } catch (e) {
+      logger.warn('auto-ack on reply failed', { orgId, code: (e as { code?: unknown })?.code ?? (e as Error)?.name ?? 'unknown' });
+    }
+    // v4: a message from someone else cancels pending no-reply reminders in this channel.
+    try {
+      await cancelRemindersOnReply(orgId, channelId, message.senderUid);
+    } catch (e) {
+      logger.warn('reminder cancel on reply failed', { orgId, code: (e as { code?: unknown })?.code ?? (e as Error)?.name ?? 'unknown' });
+    }
   }
 
   const recipients = channel.memberUids.filter((u) => u !== message.senderUid);
-  if (recipients.length === 0) return;
+  const isBroadcast = channel.type === 'broadcast';
+  const fansOut = recipients.length > 0 && (!isBroadcast || message.senderUid === channel.createdBy);
+  const hasMentions = !fromSystem && mayContainMentions(body);
+  const isDm = channel.type === 'direct' && !fromSystem;
+  const filtered = fansOut && message.priority === 'normal';
 
-  if (channel.type === 'broadcast') {
-    if (message.senderUid !== channel.createdBy) return;
-    await pushToMembers(orgId, recipients, messagePushTitle(message.priority), { type: 'message', orgId, channelId, priority: message.priority });
+  // One batched read of recipient member docs (+ prefs when filtering) serves mentions, the
+  // out-of-office check, delivery filtering and the push itself.
+  const docs: RecipientDocs =
+    filtered || hasMentions || isDm
+      ? await loadRecipientDocs(orgId, channelId, recipients, filtered)
+      : { members: new Map(), prefs: new Map() };
+
+  let orgTz: string | null = null;
+  const timeZone = async () => (orgTz ??= (await getDocData<Org>(paths.org(orgId)))?.timezone ?? 'UTC');
+
+  // v4: template marker and mentions.
+  let mentioned = EMPTY_MENTIONS;
+  if (hasMentions) {
+    try {
+      mentioned = await resolveMentions({ orgId, body, senderUid: message.senderUid, channelMemberUids: channel.memberUids, members: docs.members, now });
+    } catch (e) {
+      logger.warn('mention resolution failed', { orgId, code: (e as { code?: unknown })?.code ?? (e as Error)?.name ?? 'unknown' });
+    }
+  }
+  if (stripped.templateId || mentioned.mentions.length || mentioned.mentionRoles.length) {
+    await db().runTransaction(async (tx) => {
+      const snap = await tx.get(msgRef);
+      if (!snap.exists) return;
+      const cur = snap.data() as Message;
+      // Never resurrect a recalled body or overwrite an edit that already re-parsed mentions.
+      if (cur.recalledAt || cur.editedAt) return;
+      const update: Record<string, unknown> = {};
+      if (stripped.templateId) {
+        update.body = body;
+        update.templateId = stripped.templateId;
+      }
+      if (mentioned.mentions.length || mentioned.mentionRoles.length) {
+        update.mentions = mentioned.mentions;
+        update.mentionRoles = mentioned.mentionRoles;
+      }
+      tx.update(msgRef, update);
+    });
+  }
+  if (mentioned.nonMembers.length) {
+    await postSilentNote(
+      orgId,
+      channelId,
+      silentNoteId('mention', messageId),
+      nonMemberNoteText(mentioned.nonMembers.map((m) => m.name)),
+      parentId,
+    );
+  }
+
+  // v4: out-of-office auto-reply on direct messages.
+  if (isDm) {
+    const other = recipients[0];
+    const m = other ? docs.members.get(other) : undefined;
+    if (m && m.active && isOutOfOffice(m, now.getTime())) {
+      try {
+        await postOutOfOfficeReply(orgId, channelId, m, now, docs.members, timeZone);
+      } catch (e) {
+        logger.warn('out-of-office reply failed', { orgId, code: (e as { code?: unknown })?.code ?? (e as Error)?.name ?? 'unknown' });
+      }
+    }
+  }
+
+  if (!fansOut) return;
+  const pushData: PushData = { type: 'message', orgId, channelId, messageId, priority: message.priority };
+
+  if (isBroadcast) {
+    const targets = filtered
+      ? (await filterRecipients({ orgId, channelType: channel.type, priority: message.priority, recipients, docs, mentioned: new Set(mentioned.mentions), now, timeZone })).push
+      : recipients;
+    await pushToMembers(orgId, targets, messagePushTitle(message.priority), pushData, filtered ? { members: docs.members } : {});
     return;
   }
 
   if (message.priority === 'urgent' || message.priority === 'critical') {
     if (message.alertId) return;
     // senderName is client-written; use the member doc for the alert text.
-    const sender = await getDocData<Member>(paths.member(orgId, message.senderUid));
+    const sender = fromSystem ? null : await getDocData<Member>(paths.member(orgId, message.senderUid));
     const { alertId } = await raiseAlert({
       orgId,
       alertId: messageAlertId(channelId, messageId),
@@ -95,16 +196,47 @@ export async function handleMessageCreated(orgId: string, channelId: string, mes
       policyId: 'default',
       createdBy: message.senderUid,
     });
-    await docRef(paths.message(orgId, channelId, messageId)).update({ alertId });
+    await msgRef.update({ alertId });
     return;
   }
 
-  await pushToMembers(orgId, recipients, messagePushTitle(message.priority), {
-    type: 'message',
-    orgId,
-    channelId,
-    priority: message.priority,
+  const { push, skipped } = await filterRecipients({
+    orgId, channelType: channel.type, priority: message.priority, recipients, docs, mentioned: new Set(mentioned.mentions), now, timeZone,
   });
+  if (Object.keys(skipped).length) logger.debug('push filtered', { orgId, channelId, skipped });
+  await pushToMembers(orgId, push, messagePushTitle(message.priority), pushData, { members: docs.members });
+}
+
+/** Posts "{name} is out of office until {date}. Contact {delegate} instead." at most once a day per absence. */
+async function postOutOfOfficeReply(
+  orgId: string,
+  channelId: string,
+  away: Member,
+  now: Date,
+  loaded: ReadonlyMap<string, Member>,
+  timeZone: () => Promise<string>,
+): Promise<void> {
+  const untilMs = toMillis(away.outOfOffice!.until);
+  const delegateUid = away.outOfOffice?.delegateUid ?? null;
+  let delegateName: string | null = null;
+  if (delegateUid && delegateUid !== away.uid) {
+    const d = loaded.get(delegateUid) ?? (await getDocData<Member>(paths.member(orgId, delegateUid)));
+    if (d?.active) delegateName = d.displayName;
+  }
+  const tz = await timeZone();
+  const body = outOfOfficeReply({ name: away.displayName, untilMs, timeZone: tz, delegateName });
+  await postSilentNote(orgId, channelId, silentNoteId('ooo', away.uid, untilMs, todayInTimeZone(now, tz)), body);
+}
+
+/** v4: marks pending no-reply reminders in the channel owned by someone other than `replierUid` as cancelled. */
+export async function cancelRemindersOnReply(orgId: string, channelId: string, replierUid: string): Promise<number> {
+  const snap = await colRef(paths.reminders(orgId)).where('channelId', '==', channelId).where('status', '==', 'pending').limit(50).get();
+  const toCancel = snap.docs.filter((d) => (d.data() as NoReplyReminder).ownerUid !== replierUid);
+  if (!toCancel.length) return 0;
+  const batch = db().batch();
+  for (const d of toCancel) batch.update(d.ref, { status: 'cancelled' });
+  await batch.commit();
+  return toCancel.length;
 }
 
 /**

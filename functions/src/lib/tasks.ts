@@ -1,4 +1,4 @@
-/** Cloud Tasks enqueueing for escalation checks (handled by `escalateAlert`). */
+/** Cloud Tasks enqueueing for escalation checks (`escalateAlert`) and v4 no-reply reminders (`fireNoReplyReminder`). */
 import { getFunctions } from 'firebase-admin/functions';
 import { logger } from 'firebase-functions/v2';
 
@@ -29,6 +29,31 @@ export async function enqueueEscalationCheck(payload: EscalationTaskPayload, del
       logger.info('escalation task already enqueued', { alertId: payload.alertId, level: payload.expectedLevel });
       return;
     }
+    throw e;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// v4: "remind me if no reply" (handled by `fireNoReplyReminder`)
+// ---------------------------------------------------------------------------
+
+export const REMINDER_FUNCTION = 'fireNoReplyReminder';
+
+export interface ReminderTaskPayload {
+  orgId: string;
+  reminderId: string;
+}
+
+export function reminderTaskId(p: ReminderTaskPayload): string {
+  return `rem-${p.orgId}-${p.reminderId}`.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 480);
+}
+
+export async function enqueueReminderTask(payload: ReminderTaskPayload, delaySeconds: number): Promise<void> {
+  const queue = getFunctions().taskQueue(`locations/${REGION}/functions/${REMINDER_FUNCTION}`);
+  try {
+    await queue.enqueue(payload, { scheduleDelaySeconds: Math.max(0, Math.round(delaySeconds)), id: reminderTaskId(payload) });
+  } catch (e) {
+    if ((e as { code?: string }).code === 'functions/task-already-exists') return;
     throw e;
   }
 }

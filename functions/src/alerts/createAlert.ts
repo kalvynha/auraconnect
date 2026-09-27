@@ -30,7 +30,7 @@ export async function createAlertHandler(request: CallableRequest<CreateAlertReq
 
   let targets = [...(input.targetUids ?? [])];
   if (input.roleKey) {
-    const res = await resolveOnCall(ctx.orgId, input.roleKey, { excludeUid: ctx.uid });
+    const res = await resolveOnCall(ctx.orgId, input.roleKey, { excludeUid: ctx.uid, availability: 'prefer' });
     if (!res.role) throw new HttpsError('not-found', 'Unknown on-call role.');
     targets.push(...res.uids);
   }

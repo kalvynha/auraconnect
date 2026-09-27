@@ -50,7 +50,7 @@ describe('onMessageCreated', () => {
     expect(ch.lastMessage.text.length).toBeLessThanOrEqual(140);
     expect(ch.lastMessage.senderUid).toBe('b');
     expect(ch.lastMessageAt.toMillis()).toBe((m.createdAt as Timestamp).toMillis());
-    expect(pushToMembers).toHaveBeenCalledWith(ORG, ['a', 'c'], 'New message', { type: 'message', orgId: ORG, channelId: 'ch1', priority: 'normal' });
+    expect(pushToMembers).toHaveBeenCalledWith(ORG, ['a', 'c'], 'New message', { type: 'message', orgId: ORG, channelId: 'ch1', messageId: 'm1', priority: 'normal' }, expect.anything());
     expect(docsIn(`orgs/${ORG}/alerts`)).toHaveLength(0);
   });
 

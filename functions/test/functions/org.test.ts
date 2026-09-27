@@ -19,6 +19,7 @@ import { acceptInviteHandler } from '../../src/org/acceptInvite';
 import { listMyInvitesHandler } from '../../src/org/listMyInvites';
 import { handleMemberWritten } from '../../src/org/onMemberWritten';
 import { docsIn, member, ORG, req, seedOrg } from './helpers';
+import { DEFAULT_TEMPLATES } from '../../src/domain/templates';
 
 beforeEach(() => {
   seedOrg();
@@ -35,6 +36,10 @@ describe('createOrg', () => {
     expect(fakeDb.read<any>(`orgs/${orgId}/members/new`)).toMatchObject({ role: 'admin', active: true, email: 'dana@example.org', fcmTokens: [] });
     expect(fakeDb.read<any>('userOrgs/new')).toEqual({ orgId, role: 'admin' });
     expect(claims.get('new')).toEqual({ orgId, role: 'admin' });
+    // v4: the default message templates are seeded with the org.
+    const templates = docsIn(`orgs/${orgId}/messageTemplates`);
+    expect(templates.map((t) => t.id).sort()).toEqual(DEFAULT_TEMPLATES.map((d) => d.id).sort());
+    expect(templates.find((t) => t.id === 'default-sbar')!.data).toMatchObject({ category: 'escalation', defaultPriority: 'urgent', createdBy: 'new', active: true });
     await expect(createOrgHandler(req({ name: 'Again', timezone: 'UTC', displayName: 'D', discipline: 'RN' }, { uid: 'new', orgId: null }))).rejects.toMatchObject({ code: 'already-exists' });
   });
 

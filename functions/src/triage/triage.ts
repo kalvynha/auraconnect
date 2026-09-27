@@ -124,7 +124,8 @@ export async function logTriageCallHandler(request: CallableRequest<LogTriageCal
     assignedUid = input.assignedUid;
     onDuty = [input.assignedUid];
   } else if (roleKey) {
-    const res = await resolveOnCall(ctx.orgId, roleKey);
+    // v4: off and out-of-office members are skipped; nobody left → urgent calls go to admins below.
+    const res = await resolveOnCall(ctx.orgId, roleKey, { availability: 'skip' });
     if (!res.role && input.roleKey) throw new HttpsError('not-found', `On-call role "${input.roleKey}" not found.`);
     onDuty = res.uids;
     assignedUid = res.uids[0] ?? null;

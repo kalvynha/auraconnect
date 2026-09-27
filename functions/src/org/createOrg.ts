@@ -7,6 +7,7 @@ import { setOrgClaims } from '../lib/claims';
 import { parse, requireAuth } from '../lib/context';
 import { colRef, db, docRef, paths } from '../lib/db';
 import { discipline, timeZone } from '../lib/schemas';
+import { writeDefaultTemplates } from '../messaging/templates';
 import type { CreateOrgRequest, CreateOrgResponse } from '../shared/types';
 
 const schema = z.object({
@@ -54,6 +55,8 @@ export async function createOrgHandler(request: CallableRequest<CreateOrgRequest
       createdAt: now,
     });
     tx.set(docRef(paths.userOrg(auth.uid)), { orgId, role: 'admin' });
+    // v4: default message templates (SBAR, fall report, quick replies, …).
+    writeDefaultTemplates(tx, orgId, auth.uid);
     await writeAudit(orgId, { actorUid: auth.uid, action: 'org.create', resourceType: 'org', resourceId: orgId }, tx);
   });
 

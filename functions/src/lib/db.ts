@@ -31,6 +31,18 @@ export const paths = {
   referral: (orgId: string, id: string) => `orgs/${orgId}/referrals/${id}`,
   auditLogs: (orgId: string) => `orgs/${orgId}/auditLogs`,
   userOrg: (uid: string) => `userOrgs/${uid}`,
+  // v4 messaging
+  read: (orgId: string, channelId: string, uid: string) => `orgs/${orgId}/channels/${channelId}/reads/${uid}`,
+  channelPrefs: (orgId: string, channelId: string, uid: string) => `orgs/${orgId}/channels/${channelId}/prefs/${uid}`,
+  acks: (orgId: string, channelId: string) => `orgs/${orgId}/channels/${channelId}/acks`,
+  reactions: (orgId: string, channelId: string, messageId: string) => `orgs/${orgId}/channels/${channelId}/messages/${messageId}/reactions`,
+  orgTemplates: (orgId: string) => `orgs/${orgId}/messageTemplates`,
+  orgTemplate: (orgId: string, id: string) => `orgs/${orgId}/messageTemplates/${id}`,
+  memberTemplates: (orgId: string, uid: string) => `orgs/${orgId}/members/${uid}/templates`,
+  memberTemplate: (orgId: string, uid: string, id: string) => `orgs/${orgId}/members/${uid}/templates/${id}`,
+  reminders: (orgId: string) => `orgs/${orgId}/reminders`,
+  reminder: (orgId: string, id: string) => `orgs/${orgId}/reminders/${id}`,
+  messageEdits: (orgId: string) => `orgs/${orgId}/messageEdits`,
 } as const;
 
 export function docRef(path: string): DocumentReference {

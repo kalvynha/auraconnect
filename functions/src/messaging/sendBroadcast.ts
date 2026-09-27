@@ -7,6 +7,9 @@
  * Targets: `team` → the team's active members; `role` → who is on call now
  * (shifts, else fallbackUids); `discipline` → active members with that
  * discipline; `all` → every active member. The sender is never a recipient.
+ *
+ * v4: `requireAck: true` sets `channel.requireAck`; recipients acknowledge by writing
+ * `channels/{id}/acks/{uid}` themselves, and `broadcastAckReport` lists acked and pending.
  */
 import { FieldValue } from 'firebase-admin/firestore';
 import { HttpsError, onCall, type CallableRequest } from 'firebase-functions/v2/https';
@@ -38,6 +41,7 @@ const schema = z.object({
   target,
   body: z.string().trim().min(1).max(8000),
   priority,
+  requireAck: z.boolean().optional().default(false),
 });
 
 /** Resolves broadcast recipients (active members only), excluding the sender. Sorted. */
@@ -88,16 +92,16 @@ export async function sendBroadcastHandler(request: CallableRequest<SendBroadcas
   const channelRef = colRef(paths.channels(ctx.orgId)).doc();
   const msgRef = colRef(paths.messages(ctx.orgId, channelRef.id)).doc();
   const batch = db().batch();
-  batch.set(
-    channelRef,
-    newChannelDoc({
+  batch.set(channelRef, {
+    ...newChannelDoc({
       type: 'broadcast',
       name: input.name,
       memberUids: [...recipients, ctx.uid],
       createdBy: ctx.uid,
       teamId: input.target.kind === 'team' ? input.target.teamId : null,
     }),
-  );
+    requireAck: input.requireAck,
+  });
   batch.set(msgRef, {
     senderUid: ctx.uid,
     senderName: sender.displayName,
@@ -116,7 +120,7 @@ export async function sendBroadcastHandler(request: CallableRequest<SendBroadcas
       action: 'broadcast.send',
       resourceType: 'channel',
       resourceId: channelRef.id,
-      metadata: { target: input.target.kind, recipients: recipients.length, priority: input.priority },
+      metadata: { target: input.target.kind, recipients: recipients.length, priority: input.priority, requireAck: input.requireAck },
     },
     batch,
   );

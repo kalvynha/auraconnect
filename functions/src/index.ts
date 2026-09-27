@@ -24,6 +24,13 @@ export { searchMessages } from './messaging/searchMessages';
 export { sendBroadcast } from './messaging/sendBroadcast';
 export { purgeExpiredMessages } from './messaging/purgeExpiredMessages';
 export { joinPatientChannelForCoverage, expireChannelCoverageJob } from './messaging/coverage';
+// v4 messaging
+export { saveTemplate, deleteTemplate, seedDefaultTemplates } from './messaging/templates';
+export { messageReadStatus, nudgeUnread, remindIfNoReply, cancelReminder, fireNoReplyReminder } from './messaging/tracking';
+export { broadcastAckReport } from './messaging/broadcastAck';
+export { pinMessage, renameChannel, leaveChannel } from './messaging/channelActions';
+export { editMessage } from './messaging/editMessage';
+export { onReactionWritten } from './messaging/reactions';
 
 export { createAlert } from './alerts/createAlert';
 export { ackAlert, resolveAlert } from './alerts/alertActions';

@@ -7,6 +7,8 @@
  * v3 (S6, soft recall): the original is first copied to the admin-only
  * `messageRecalls/{channelId}_{messageId}` in the same transaction, and the
  * attachment files are kept in Storage (the copy still references them).
+ *
+ * v4: a pinned message is unpinned when recalled.
  */
 import { FieldValue } from 'firebase-admin/firestore';
 import { HttpsError, onCall, type CallableRequest } from 'firebase-functions/v2/https';
@@ -63,9 +65,15 @@ export async function recallMessageHandler(request: CallableRequest<RecallMessag
     tx.set(recallRef, copy);
     tx.update(msgRef, { recalledAt: FieldValue.serverTimestamp(), body: '', attachments: [] });
     const last = channel.lastMessage;
+    const channelUpdate: Record<string, unknown> = {};
     if (!message.threadParentId && last && last.senderUid === message.senderUid && sameInstant(last.at, message.createdAt)) {
-      tx.update(channelRef, { 'lastMessage.text': RECALLED_PREVIEW });
+      channelUpdate['lastMessage.text'] = RECALLED_PREVIEW;
     }
+    // v4: a recalled message is unpinned (the pin snippet holds its text).
+    if ((channel.pinned ?? []).some((p) => p.messageId === input.messageId)) {
+      channelUpdate.pinned = (channel.pinned ?? []).filter((p) => p.messageId !== input.messageId);
+    }
+    if (Object.keys(channelUpdate).length) tx.update(channelRef, channelUpdate);
     const files = safeAttachmentPaths(ctx.orgId, input.channelId, message.attachments);
     await writeAudit(
       ctx.orgId,

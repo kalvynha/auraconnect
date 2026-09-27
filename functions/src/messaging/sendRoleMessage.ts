@@ -45,7 +45,8 @@ export async function sendRoleMessageHandler(request: CallableRequest<SendRoleMe
   const sender = await getDocData<Member>(paths.member(ctx.orgId, ctx.uid));
   if (!sender?.active) throw new HttpsError('permission-denied', 'Your membership is not active.');
 
-  const resolved = await resolveOnCall(ctx.orgId, input.roleKey, { excludeUid: ctx.uid });
+  // v4: skips members who are off or out of office (falls through to the next shift holder or fallback).
+  const resolved = await resolveOnCall(ctx.orgId, input.roleKey, { excludeUid: ctx.uid, availability: 'skip' });
   if (!resolved.role) throw new HttpsError('not-found', 'Unknown on-call role.');
   if (resolved.uids.length === 0) throw new HttpsError('failed-precondition', 'Nobody is on call for this role right now.');
 

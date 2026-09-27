@@ -61,7 +61,7 @@ export async function raiseAlert(params: RaiseAlertParams): Promise<RaiseAlertRe
   const { policyId, policy } = params.resolved ?? (await resolvePolicy(params.orgId, params.policyId));
   // Level 0 = steps[0]: explicit targets plus step 0's target (usually 'original').
   const step0 = hasSteps(policy) ? policy.steps[0]!.target : null;
-  const roleUids = step0?.kind === 'role' ? (await resolveOnCall(params.orgId, step0.roleKey)).uids : [];
+  const roleUids = step0?.kind === 'role' ? (await resolveOnCall(params.orgId, step0.roleKey, { availability: 'prefer' })).uids : [];
   const targets = initialRecipients(params.targetUids, policy, () => roleUids);
   const ref = params.alertId ? docRef(paths.alert(params.orgId, params.alertId)) : colRef(paths.alerts(params.orgId)).doc();
   const now = FieldValue.serverTimestamp();

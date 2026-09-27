@@ -139,7 +139,7 @@ describe('onMessageCreated threads and broadcasts', () => {
     expect(p.lastReplyAt.toMillis()).toBe(5_000); // an older reply doesn't move it back
     expect(fakeDb.read<any>(CH)!.lastMessage.text).toBe('parent');
     expect(pushToMembers).toHaveBeenCalledTimes(2);
-    expect(pushToMembers).toHaveBeenCalledWith(ORG, ['a', 'b'], 'New message', { type: 'message', orgId: ORG, channelId: 'ch1', priority: 'normal' });
+    expect(pushToMembers).toHaveBeenCalledWith(ORG, ['a', 'b'], 'New message', { type: 'message', orgId: ORG, channelId: 'ch1', messageId: 'r1', priority: 'normal' }, expect.anything());
   });
 
   it('ignores a missing parent without failing', async () => {
@@ -151,7 +151,7 @@ describe('onMessageCreated threads and broadcasts', () => {
   it('broadcast: pushes at priority with no escalating alert; ignores non-creator senders', async () => {
     seedChannel('bc', { type: 'broadcast', createdBy: 'a', memberUids: ['a', 'b', 'c'] });
     await handleMessageCreated(ORG, 'bc', 'm1', msg({ senderUid: 'a', priority: 'critical' }));
-    expect(pushToMembers).toHaveBeenCalledWith(ORG, ['b', 'c'], 'Critical message', { type: 'message', orgId: ORG, channelId: 'bc', priority: 'critical' });
+    expect(pushToMembers).toHaveBeenCalledWith(ORG, ['b', 'c'], 'Critical message', { type: 'message', orgId: ORG, channelId: 'bc', messageId: 'm1', priority: 'critical' }, {});
     expect(docsIn(`orgs/${ORG}/alerts`)).toHaveLength(0);
     vi.mocked(pushToMembers).mockClear();
     await handleMessageCreated(ORG, 'bc', 'm2', msg({ senderUid: 'b' }));
@@ -238,7 +238,7 @@ describe('sendBroadcast', () => {
     expect(fakeDb.read<any>(`orgs/${ORG}/channels/${res.channelId}/messages/${res.messageId}`)).toMatchObject({
       senderUid: 'b', senderName: 'User B', body: 'Office closed', priority: 'urgent', alertId: null, attachments: [],
     });
-    expect(docsIn(`orgs/${ORG}/auditLogs`).find((l) => l.data.action === 'broadcast.send')?.data.metadata).toEqual({ target: 'all', recipients: 4, priority: 'urgent' });
+    expect(docsIn(`orgs/${ORG}/auditLogs`).find((l) => l.data.action === 'broadcast.send')?.data.metadata).toEqual({ target: 'all', recipients: 4, priority: 'urgent', requireAck: false });
   });
 
   it('rejects viewers, empty targets and bad input', async () => {

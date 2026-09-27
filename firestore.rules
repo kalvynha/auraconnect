@@ -186,6 +186,52 @@ service cloud.firestore {
       return v in ['companionship', 'respite', 'vigil', 'errands', 'bereavement', 'admin', 'other'];
     }
 
+    // v4 self-writable member fields (functions/src/shared/types.ts MemberStatus,
+    // OutOfOffice, NotificationSettings). Each may be absent or null (cleared).
+    function isHHmm(v) {
+      return v is string && v.matches('([01][0-9]|2[0-3]):[0-5][0-9]');
+    }
+
+    function isMemberStatus(v) {
+      return v == null
+        || (v is map
+            && v.keys().hasAll(['state', 'text', 'until'])
+            && v.keys().hasOnly(['state', 'text', 'until'])
+            && v.state in ['available', 'in_visit', 'busy', 'off']
+            && isStringOrNull(v.text, 100)
+            && (v.until == null || v.until is timestamp));
+    }
+
+    function isOutOfOffice(v) {
+      return v == null
+        || (v is map
+            && v.keys().hasAll(['until', 'delegateUid', 'note'])
+            && v.keys().hasOnly(['until', 'delegateUid', 'note'])
+            && v.until is timestamp
+            && (v.delegateUid == null || isNonEmptyString(v.delegateUid, 128))
+            && isStringOrNull(v.note, 500));
+    }
+
+    function isNotificationSettings(v) {
+      return v == null
+        || (v is map
+            && v.keys().hasAll(['quietHours', 'offShiftQuiet'])
+            && v.keys().hasOnly(['quietHours', 'offShiftQuiet'])
+            && v.offShiftQuiet is bool
+            && (v.quietHours == null
+                || (v.quietHours is map
+                    && v.quietHours.keys().hasAll(['start', 'end'])
+                    && v.quietHours.keys().hasOnly(['start', 'end'])
+                    && isHHmm(v.quietHours.start)
+                    && isHHmm(v.quietHours.end))));
+    }
+
+    function hasValidV4MemberFields() {
+      return isMemberStatus(incoming().get('status', null))
+        && isOutOfOffice(incoming().get('outOfOffice', null))
+        && isNotificationSettings(incoming().get('notificationSettings', null));
+    }
+
     // Clinical roles per DATA_MODEL v2: admin, clinician, intake.
     function isClinical(orgId) {
       return hasRole(orgId, ['admin', 'clinician', 'intake']);
@@ -259,18 +305,30 @@ service cloud.firestore {
             && incoming().fcmTokens is list
             && incoming().fcmTokens.size() <= 20
             // v3: optional capability grants (known strings only).
-            && isCapabilityList(incoming().get('capabilities', [])))
+            && isCapabilityList(incoming().get('capabilities', []))
+            // v4: status / outOfOffice / notificationSettings stay well-formed.
+            && hasValidV4MemberFields())
           ||
           // Self: profile + device tokens only (never role, discipline,
           // capabilities, active or teamIds).
+          // v4: also status, outOfOffice and notificationSettings (shape-validated).
           (request.auth.uid == uid
             && isActiveMember(orgId)
-            && onlyChanged(['fcmTokens', 'displayName', 'phone', 'title'])
+            && onlyChanged(['fcmTokens', 'displayName', 'phone', 'title',
+                            'status', 'outOfOffice', 'notificationSettings'])
             && incoming().fcmTokens is list
             && incoming().fcmTokens.size() <= 20
             && isNonEmptyString(incoming().displayName, 200)
             && isStringOrNull(incoming().phone, 50)
-            && isStringOrNull(incoming().title, 200));
+            && isStringOrNull(incoming().title, 200)
+            && hasValidV4MemberFields());
+
+        // v4: personal message templates — the owner reads; written only by
+        // `saveTemplate` / `deleteTemplate` (scope 'personal').
+        match /templates/{templateId} {
+          allow read: if request.auth.uid == uid && isActiveMember(orgId);
+          allow write: if false;
+        }
       }
 
       // -------------------------------------------------------------------
@@ -430,6 +488,22 @@ service cloud.firestore {
             && isValidNewMessage(memberDoc(orgId).data, channelDoc().data, incoming());
 
           allow update, delete: if false;
+
+          // v4: one reaction per member (Reaction). The member must be able
+          // to post; `onReactionWritten` maintains message.reactionCounts.
+          // get() budget: member doc + channel doc.
+          match /reactions/{uid} {
+            allow read: if isChannelMember();
+            allow create, update: if request.auth.uid == uid
+              && canPost(orgId)
+              && isChannelMember()
+              && exactKeys(['emoji', 'at'])
+              && incoming().emoji in ['👍', '✅', '❤️', '🙏', '👀', '❗']
+              && incoming().at == request.time;
+            allow delete: if request.auth.uid == uid
+              && canPost(orgId)
+              && isChannelMember();
+          }
         }
 
         // Read receipts: each member maintains only their own.
@@ -440,6 +514,32 @@ service cloud.firestore {
             && exactKeys(['lastReadAt'])
             && incoming().lastReadAt == request.time;
           allow delete: if false;
+        }
+
+        // v4: per-member notification prefs for this channel (ChannelPrefs).
+        // Read by the owner only; written by the owner while a channel member.
+        match /prefs/{uid} {
+          allow read: if request.auth.uid == uid && isActiveMember(orgId);
+          allow create, update: if request.auth.uid == uid
+            && isChannelMember()
+            && exactKeys(['mode', 'mutedUntil', 'updatedAt'])
+            && incoming().mode in ['all', 'mentions', 'urgent_only']
+            && (incoming().mutedUntil == null || incoming().mutedUntil is timestamp)
+            && incoming().updatedAt == request.time;
+          allow delete: if false;
+        }
+
+        // v4: acknowledgements of an ack-required broadcast (BroadcastAck).
+        // Self create only, while a member of a channel with requireAck == true.
+        match /acks/{uid} {
+          allow read: if isChannelMember();
+          allow create: if request.auth.uid == uid
+            && isChannelMember()
+            && channelDoc().data.get('requireAck', false) == true
+            && exactKeys(['messageId', 'ackedAt'])
+            && isNonEmptyString(incoming().messageId, 128)
+            && incoming().ackedAt == request.time;
+          allow update, delete: if false;
         }
       }
 
@@ -693,6 +793,26 @@ service cloud.firestore {
       // v3 (S6): originals of recalled messages (admin or `audit` capability).
       match /messageRecalls/{recallId} {
         allow read: if hasCap(orgId, 'audit');
+        allow write: if false;
+      }
+
+      // v4: prior bodies of edited messages (admin or `audit` capability).
+      match /messageEdits/{editId} {
+        allow read: if hasCap(orgId, 'audit');
+        allow write: if false;
+      }
+
+      // v4: org message templates. Staff (not volunteers) read; admins
+      // manage them through `saveTemplate` / `deleteTemplate`.
+      match /messageTemplates/{templateId} {
+        allow read: if isStaffMember(orgId);
+        allow write: if false;
+      }
+
+      // v4: "remind me if no reply" (NoReplyReminder). Owner reads (list
+      // queries must filter ownerUid == uid); functions write.
+      match /reminders/{reminderId} {
+        allow read: if isActiveMember(orgId) && resource.data.ownerUid == request.auth.uid;
         allow write: if false;
       }
 

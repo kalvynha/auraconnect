@@ -10,7 +10,7 @@
  *
  * Options: --label NAME (results/NAME.json|md), --history-weeks N (default 12),
  * --concurrency N (default 24), --accept-concurrency N (invite acceptance, default 4), --gemini-ms N (default 800), --messages N (default 5000),
- * --seed N, --no-purge.
+ * --seed N, --no-purge, --no-v4-prefs (skip the v4 muted-channel / mention scenario).
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -52,6 +52,7 @@ async function main(): Promise<void> {
     fcmLatencyMs: 30,
     tasksLatencyMs: 15,
     purge: !process.argv.includes('--no-purge'),
+    v4Prefs: !process.argv.includes('--no-v4-prefs'),
   };
   if (getApps().length === 0) initializeApp({ projectId: PROJECT });
   installFirestoreCounters();

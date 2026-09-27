@@ -690,7 +690,18 @@ export type AuditAction =
   | 'report.census'
   // v3 clinical safety and lifecycle
   | 'patient.clinical_update'
-  | 'channel.archive';
+  | 'channel.archive'
+  // v4 messaging
+  | 'template.save'
+  | 'template.delete'
+  | 'template.seed'
+  | 'message.edit'
+  | 'message.pin'
+  | 'message.unpin'
+  | 'message.nudge'
+  | 'channel.rename'
+  | 'channel.leave'
+  | 'broadcast.ack_report';
 
 /** `orgs/{orgId}/auditLogs/{id}` — written only by Cloud Functions. */
 export interface AuditLog {
@@ -813,6 +824,8 @@ export interface PushData {
   orgId: string;
   channelId?: string;
   alertId?: string;
+  /** v4: the message a message push (or a message-sourced alert push) is about. IDs only, no PHI. */
+  messageId?: string;
   priority: Priority;
 }
 
@@ -1902,6 +1915,9 @@ export interface SaveTemplateRequest {
   template: Omit<MessageTemplate, 'createdBy' | 'updatedAt'>;
 }
 export interface DeleteTemplateRequest { orgId: string; templateId: string; scope: 'org' | 'personal' }
+/** `saveTemplate` and `remindIfNoReply` return `IdResponse`. */
+export interface SeedDefaultTemplatesRequest { orgId: string }
+export interface SeedDefaultTemplatesResponse { created: number; existing: number }
 export interface BroadcastAckReportRequest { orgId: string; channelId: string; messageId: string }
 export interface BroadcastAckReportResponse {
   total: number;

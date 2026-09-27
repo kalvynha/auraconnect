@@ -6,8 +6,12 @@ import { enqueueEscalationCheck } from '../lib/tasks';
 import type { Alert, EscalationPolicy, PushData } from '../shared/types';
 import { FIRESTORE_TRIGGER_REGION } from '../lib/regions';
 
+/** v4: title of the "remind me if no reply" self-alert (PHI-free, also used as its push title). */
+export const NO_REPLY_ALERT_TITLE = 'No reply yet';
+
 /** Generic, PHI-free push title for an alert. */
-export function alertNotificationTitle(alert: Pick<Alert, 'priority' | 'source'>): string {
+export function alertNotificationTitle(alert: Pick<Alert, 'priority' | 'source'> & { title?: string }): string {
+  if (alert.source.type === 'message' && alert.title === NO_REPLY_ALERT_TITLE) return NO_REPLY_ALERT_TITLE;
   if (alert.source.type === 'message') return messagePushTitle(alert.priority);
   if (alert.source.type === 'deadline') return 'Deadline reminder';
   return alertPushTitle(alert.priority);
@@ -15,7 +19,10 @@ export function alertNotificationTitle(alert: Pick<Alert, 'priority' | 'source'>
 
 export function alertPushData(orgId: string, alertId: string, alert: Pick<Alert, 'priority' | 'source'>): PushData {
   const data: PushData = { type: 'alert', orgId, alertId, priority: alert.priority };
-  if (alert.source.type === 'message') data.channelId = alert.source.channelId;
+  if (alert.source.type === 'message') {
+    data.channelId = alert.source.channelId;
+    data.messageId = alert.source.messageId;
+  }
   return data;
 }
 

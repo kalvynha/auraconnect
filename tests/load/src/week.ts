@@ -6,7 +6,7 @@
  */
 import { FieldValue, getFirestore, Timestamp } from './admin';
 import { attempt, measure, taskQueue } from './instrument';
-import { DAY_MS, HOUR_MS, isoDateUTC, pool, progress, sleep, type Rng } from './util';
+import { DAY_MS, HOUR_MS, isoDateUTC, pool, progress, rng, sleep, type Rng } from './util';
 import { FREQUENCIES, messageBody, patientInput, req, type ChannelRec, type PatientRec, type Staff, type TeamKey, type World } from './world';
 import { handleMessageCreated } from '../../../functions/src/messaging/onMessageCreated';
 import { handleAlertCreated } from '../../../functions/src/alerts/onAlertCreated';
@@ -45,6 +45,60 @@ export interface WeekConfig {
   messagesPerWeek: number;
   geminiLatencyMs: number;
   purge: boolean;
+  /**
+   * v4 scenario: some members mute or set "mentions only" on channels, a few are out of office,
+   * and some normal messages @mention a member or an on-call role. Uses its own RNG stream, so the
+   * rest of the week is identical with it on or off (compare push fan-out with `--no-v4-prefs`).
+   */
+  v4Prefs: boolean;
+}
+
+export const V4_SCENARIO = {
+  /** Patient channels: share of non-RN members on "mentions only" / muted all week. */
+  patientMentionsOnly: 0.3,
+  patientMuted: 0.05,
+  /** Team and group channels: share of members who muted them. */
+  groupMuted: 0.4,
+  /** Staff out of office all week (with a delegate). */
+  outOfOffice: 2,
+  /** Normal messages that @mention another channel member / an on-call role. */
+  memberMention: 0.15,
+  roleMention: 0.02,
+};
+
+/** v4: channel prefs and out-of-office, written directly as the clients do. */
+async function setupV4Scenario(w: World, r4: Rng, concurrency: number): Promise<void> {
+  const db = getFirestore();
+  const until = Timestamp.fromMillis(Date.now() + 8 * DAY_MS);
+  const writes: Array<() => Promise<unknown>> = [];
+  for (const c of w.channels) {
+    if (c.kind === 'direct') continue;
+    for (const uid of c.members) {
+      const s = w.byUid.get(uid);
+      if (!s) continue;
+      let mode: 'all' | 'mentions' | null = null;
+      let muted = false;
+      if (c.kind === 'patient') {
+        if (s.kind === 'rn') continue; // the primary RN hears everything
+        if (r4.chance(V4_SCENARIO.patientMentionsOnly)) mode = 'mentions';
+        else if (r4.chance(V4_SCENARIO.patientMuted)) muted = true;
+      } else if (r4.chance(V4_SCENARIO.groupMuted)) {
+        muted = true;
+      }
+      if (!mode && !muted) continue;
+      writes.push(() =>
+        db.doc(`orgs/${w.orgId}/channels/${c.id}/prefs/${uid}`).set({
+          mode: mode ?? 'all', mutedUntil: muted ? until : null, updatedAt: FieldValue.serverTimestamp(),
+        }),
+      );
+    }
+  }
+  const away = r4.shuffle(w.staff.filter((s) => s.kind === 'aide' || s.kind === 'sw')).slice(0, V4_SCENARIO.outOfOffice);
+  for (const s of away) {
+    writes.push(() => db.doc(`orgs/${w.orgId}/members/${s.uid}`).update({ outOfOffice: { until, delegateUid: w.don.uid, note: null } }));
+  }
+  await pool(writes, concurrency);
+  progress(`v4 scenario: ${writes.length - away.length} channel prefs, ${away.length} out of office`);
 }
 
 export interface JobRun {
@@ -174,6 +228,9 @@ export async function runWeek(w: World, r: Rng, cfg: WeekConfig): Promise<JobRun
   const pump = new TriggerPump(w, r);
   pump.start();
   await sleep(500);
+  // v4 scenario on its own RNG stream (the main stream `r` is untouched either way).
+  const r4 = rng(0x4a11c0de);
+  if (cfg.v4Prefs) await setupV4Scenario(w, r4, C);
 
   const active = new Set(w.patients.map((p) => p.id));
   const activePatients = () => w.patients.filter((p) => active.has(p.id));
@@ -280,7 +337,12 @@ export async function runWeek(w: World, r: Rng, cfg: WeekConfig): Promise<JobRun
       const prior = sentByChannel.get(c.id) ?? [];
       const threadParentId = prior.length > 0 && r.chance(0.1) ? r.pick(prior).id : null;
       const patient = c.patientId ? w.patients.find((p) => p.id === c.patientId) : undefined;
-      const body = messageBody(r, patient && r.chance(0.2) ? patient.last : undefined);
+      let body = messageBody(r, patient && r.chance(0.2) ? patient.last : undefined);
+      if (cfg.v4Prefs && priority === 'normal') {
+        const others = c.members.filter((u) => u !== sender.uid && w.byUid.has(u));
+        if (others.length && r4.chance(V4_SCENARIO.memberMention)) body = `@${staff(r4.pick(others)).name} ${body}`;
+        else if (r4.chance(V4_SCENARIO.roleMention)) body = `@oncall-rn-${sender.team ?? 'north'} ${body}`;
+      }
       actions.push(async () => {
         const ref = db.collection(`orgs/${orgId}/channels/${c.id}/messages`).doc();
         await measure('client:message.create', () =>

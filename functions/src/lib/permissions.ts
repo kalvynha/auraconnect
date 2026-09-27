@@ -9,7 +9,7 @@
 import { HttpsError } from 'firebase-functions/v2/https';
 import { getDocData, paths } from './db';
 import type { OrgContext } from './context';
-import { LICENSED_DISCIPLINES, type Capability, type Member } from '../shared/types';
+import { FIELD_DISCIPLINES, LICENSED_DISCIPLINES, type Capability, type Member } from '../shared/types';
 
 export async function loadCallerMember(ctx: Pick<OrgContext, 'orgId' | 'uid'>): Promise<Member> {
   const member = await getDocData<Member>(paths.member(ctx.orgId, ctx.uid));
@@ -41,4 +41,18 @@ export async function requireLicensed(ctx: OrgContext): Promise<Member> {
     throw new HttpsError('permission-denied', 'Only an RN, NP, MD or administrator can do this.');
   }
   return member;
+}
+
+/**
+ * v4: may post in channels (mirrors the rules' `canPostAs`): admin/clinician/intake, or a
+ * `viewer` whose discipline is Aide or LPN.
+ */
+export function memberCanPost(member: Pick<Member, 'role' | 'discipline' | 'active'>): boolean {
+  if (member.active !== true) return false;
+  return member.role !== 'viewer' || FIELD_DISCIPLINES.includes(member.discipline);
+}
+
+export function requireCanPost(ctx: OrgContext): Member {
+  if (!memberCanPost(ctx.member)) throw new HttpsError('permission-denied', 'Your role does not allow posting messages.');
+  return ctx.member;
 }

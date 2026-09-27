@@ -30,6 +30,14 @@ export function toFcmData(data: PushData): Record<string, string> {
   return out;
 }
 
+/** v4: iOS notification categories (lock-screen actions): Acknowledge on alerts; Reply / Mark read on messages. */
+export const IOS_CATEGORY_ALERT = 'AURA_ALERT';
+export const IOS_CATEGORY_MESSAGE = 'AURA_MESSAGE';
+
+export function iosCategory(data: Pick<PushData, 'type'>): string {
+  return data.type === 'alert' ? IOS_CATEGORY_ALERT : IOS_CATEGORY_MESSAGE;
+}
+
 /** Builds the platform-specific payload for one batch of tokens. */
 export function buildMulticast(tokens: string[], title: string, data: PushData): MulticastMessage {
   const priority = data.priority;
@@ -51,6 +59,7 @@ export function buildMulticast(tokens: string[], title: string, data: PushData):
           'interruption-level': interruptionLevel,
           'thread-id': threadId,
           'mutable-content': true,
+          category: iosCategory(data),
         },
       },
     },
@@ -68,17 +77,28 @@ export interface PushResult {
   pruned: number;
 }
 
+export interface PushOptions {
+  /**
+   * Member docs the caller already loaded, keyed by uid (v4: `onMessageCreated` reads them for
+   * delivery filtering). Uids missing from the map are read as usual.
+   */
+  members?: ReadonlyMap<string, Member>;
+}
+
 /**
  * Sends a push to every FCM token of the given org members (inactive members
  * are skipped) and prunes tokens FCM reports as invalid.
  */
-export async function pushToMembers(orgId: string, uids: readonly string[], title: string, data: PushData): Promise<PushResult> {
+export async function pushToMembers(orgId: string, uids: readonly string[], title: string, data: PushData, opts: PushOptions = {}): Promise<PushResult> {
   const result: PushResult = { sent: 0, failed: 0, pruned: 0 };
   const unique = [...new Set(uids)].filter(Boolean);
   if (unique.length === 0) return result;
-  const members = await getMany<Member>(unique.map((u) => paths.member(orgId, u)));
+  const preloaded = opts.members;
+  const toRead = preloaded ? unique.filter((u) => !preloaded.has(u)) : unique;
+  const read = toRead.length ? await getMany<Member>(toRead.map((u) => paths.member(orgId, u))) : new Map<string, Member>();
+  const members = [...(preloaded ? unique.map((u) => preloaded.get(u)).filter((m): m is Member => !!m) : []), ...read.values()];
   const owners: Array<{ token: string; uid: string }> = [];
-  for (const m of members.values()) {
+  for (const m of members) {
     if (!m.active) continue;
     for (const t of new Set(m.fcmTokens ?? [])) if (typeof t === 'string' && t) owners.push({ token: t, uid: m.uid });
   }
