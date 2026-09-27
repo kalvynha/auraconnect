@@ -2,10 +2,11 @@
   "name": "auraconnect-scripts",
   "private": true,
   "type": "module",
-  "description": "Developer scripts (emulator seed data).",
+  "description": "Developer scripts (emulator seed data, test accounts).",
   "scripts": {
     "seed": "tsx seed.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test-accounts": "tsx test-accounts.ts"
   },
   "engines": {
     "node": ">=20"

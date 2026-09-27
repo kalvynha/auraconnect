@@ -78,7 +78,20 @@ It's safe to re-run. You still sign the BAA, upload the APNs key, turn on MFA an
    - **Simplest:** clear **Enable create (sign-up)**. Clients can then no longer create accounts, including through a first email-link sign-in. An administrator has to create each invitee's account first: Firebase console → **Authentication → Add user**, or the Admin SDK. The invite link then signs them in. New organizations are set up by your platform operator.
    - **Invite-only alternative:** keep sign-up enabled and deploy a `beforeUserCreated` blocking function. It should allow an account only when a pending, unexpired invite exists for that email (a collection-group query on `invites`), plus any bootstrap emails you allow-list. AuraConnect doesn't ship this function; add it if you need self-service onboarding with enforcement.
 
-## 4. Security checklist before real PHI
+## 4. Test accounts for manual testing
+`scripts/test-accounts.ts` creates one login per role and discipline: TestAdmin, TestDON, TestRN, TestOnCallRN, TestLPN, TestAide, TestMD, TestNP, TestSW, TestChaplain, TestIntake, TestScheduler, TestBereavement, TestVolCoord, TestVolunteer, TestQA and TestViewer.
+- Each signs in as `<username lowercase>@auraconnect.test` (e.g. `testrn@auraconnect.test`). Accounts are created pre-verified.
+- The shared password defaults to `test1234`, because Firebase requires at least 6 characters. Change it with `--password`.
+```bash
+cd scripts && npm install
+gcloud auth application-default login
+npx tsx test-accounts.ts --project YOUR_PROJECT_ID --yes            # add --org <orgId> if there are several orgs
+npx tsx test-accounts.ts --project YOUR_PROJECT_ID --delete --yes   # remove them all
+```
+Re-running the script resets each account's password, role and capabilities. **Delete these accounts before any real PHI is entered.**
+
+## 5. Security checklist before real PHI
+- [ ] Test accounts removed (`test-accounts.ts --delete`).
 - [ ] BAA signed. Every vendor that touches PHI is covered.
 - [ ] MFA required for all users. Session and app-lock timeouts agreed with compliance.
 - [ ] Self sign-up disabled or invite-only in Identity Platform (section 3, step 6).
