@@ -797,3 +797,69 @@ Types are in `functions/src/shared/types.ts`, in the section "v3 — visits plan
     - Reschedule and Record death (licensed staff, at a scheduled or in-progress visit).
     - Permission-aware Complete and Cancel; Aide/LPN viewers can complete their own visits.
   - **Patient detail:** an "Edit care team" row.
+
+---
+
+# v4: messaging
+
+The types are in the "v4" section of `functions/src/shared/types.ts`. The client message-create shape does **not** change: the create rule is near Firestore's 1,000-expression limit. So the new per-message fields (`mentions`, `mentionRoles`, `templateId`, `editedAt`, `reactionCounts`) are written only by the backend.
+
+## Access
+| Path | Read | Client write |
+|---|---|---|
+| `messageTemplates/{id}` | staff (not volunteers) | none. Admins use `saveTemplate` / `deleteTemplate` |
+| `members/{uid}/templates/{id}` | owner | none. The owner uses `saveTemplate` with `scope: 'personal'` |
+| `channels/{cid}/prefs/{uid}` | self | self: exactly `{mode, mutedUntil, updatedAt == request.time}`. The caller must be a channel member |
+| `channels/{cid}/acks/{uid}` | channel members | self **create** only: exactly `{messageId, ackedAt == request.time}`. The channel must have `requireAck == true` and the caller must be a member. No update or delete |
+| `channels/{cid}/messages/{mid}/reactions/{uid}` | channel members | self create, update and delete: exactly `{emoji in ALLOWED_REACTIONS, at == request.time}`. The caller must be a member and able to post |
+| `reminders/{id}` | owner | none |
+| `messageEdits/{id}` | admin, or members with the `audit` capability | none |
+| `members/{uid}` self-update | | the allowlist also gains `status`, `outOfOffice` and `notificationSettings` (shape-validated) |
+
+## Behavior
+- **Templates.**
+  - `createOrg` seeds the default org templates, and a `seedDefaultTemplates` admin callable adds them to existing orgs. The defaults:
+    - SBAR MD escalation (fields S, B, A, R; urgent)
+    - Fall report
+    - Symptom crisis (pain or dyspnea)
+    - Death notification to the team
+    - Visit update
+    - Medication refill request
+    - Comfort kit request
+    - DME order or pickup
+    - Family update
+    - Running late
+    - Call me when free
+    - Quick replies
+  - Clients fill placeholders locally. A message sent from a template may begin with `[[tpl:{id}]]`. `onMessageCreated` strips the marker, rewrites the body and sets `templateId`.
+- **Mentions.** `onMessageCreated` parses `@` followed by a channel member's display name (longest match, case-insensitive) or `@{roleKey}` for on-call roles.
+  - Role mentions resolve to whoever is on call now and are added to `mentions`.
+  - A mentioned user gets pushed even if their channel mode is `mentions`. A mentioned user who isn't a member of the channel is **not** added; the sender gets a system note instead.
+- **Notification delivery** (normal priority only; urgent and critical always push). A member is skipped when any of these is true:
+  - their channel prefs are `mutedUntil > now`
+  - their channel mode is `mentions` and they aren't mentioned
+  - their channel mode is `urgent_only`
+  - they are in quiet hours (org time zone)
+  - `offShiftQuiet` is on, they have on-call shifts, and none covers now
+  - they are out of office, unless mentioned
+
+  Direct messages always push unless the channel is muted.
+- **Out of office.** When a DM goes to a member whose `outOfOffice.until > now`, `onMessageCreated` posts a system message: "{name} is out of office until {date}. Contact {delegate} instead."
+  - Role routing (`sendRoleMessage`, triage, @role) skips members who are off or out of office and falls through to the next shift holder or fallback.
+- **Delivery tracking.**
+  - `messageReadStatus` returns read and unread members from `reads/{uid}.lastReadAt ≥ message.createdAt`.
+  - `nudgeUnread` re-pushes a generic "Reminder: unread message" to the unread members. The sender or an admin may use it, with a rate limit of 1 per message per 10 minutes.
+  - `remindIfNoReply` creates `reminders/{id}` and a Cloud Task. When the task fires and nobody else has posted in the channel since the message, it raises a normal self-alert, "No reply yet". A later reply cancels the reminder.
+- **Ack-required broadcasts.** `sendBroadcast` gains `requireAck`, which sets `channel.requireAck`. Recipients acknowledge with a self-written `acks/{uid}`.
+  - `broadcastAckReport` (the sender, admins, or the `reports` capability) returns who has acked and who is pending. The web page has CSV export.
+- **Pins.** `pinMessage` is available to any channel member who can post. It keeps at most 10 pins, each with a snippet of 140 characters or fewer, and writes an audit entry.
+- **Channel management.**
+  - `renameChannel` applies to group and team channels, for the creator or admins.
+  - `leaveChannel` applies to group and team channels, but not patient channels or the last member.
+  - Adding and removing members uses the existing `updateChannelMembers`.
+- **Reactions.** A trigger on `reactions/{uid}` writes updates `message.reactionCounts` (transactional increment and decrement).
+- **Edits.** `editMessage` is limited to the sender, within 15 minutes, on messages that aren't recalled.
+  - It saves the prior body to `messageEdits/{id}` (`{channelId, messageId, previousBody, editedBy, editedAt}`), sets `body` and `editedAt`, and re-parses mentions.
+  - It doesn't re-push.
+- **Web push.** The web app registers an FCM token (VAPID key from `VITE_FIREBASE_VAPID_KEY`) into `members/{uid}.fcmTokens`, using the same self-update path as iOS. The payloads are the existing generic ones.
+- **iOS lock-screen actions.** The categories are `AURA_ALERT` (Acknowledge, which requires authentication) and `AURA_MESSAGE` (Reply, a text input that requires authentication, and Mark read). The backend sets `apns.payload.aps.category` in `notify.ts`.

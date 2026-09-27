@@ -127,6 +127,10 @@ export interface Member {
   createdAt: TimestampLike;
   /** v3: extra permissions granted by an admin without making the member an admin. */
   capabilities?: Capability[];
+  // --- v4 messaging (self-writable) ---
+  status?: MemberStatus | null;
+  outOfOffice?: OutOfOffice | null;
+  notificationSettings?: NotificationSettings | null;
 }
 
 /**
@@ -224,6 +228,13 @@ export interface Channel {
   legalHold?: boolean;
   /** O1: set on discharge/death; the hourly `archiveEndedChannels` job archives the channel after it. */
   archiveAfter?: TimestampLike | null;
+  // --- v4 messaging (server-written) ---
+  /** Pinned messages (max 10), newest first. */
+  pinned?: PinnedMessage[];
+  /** Broadcast channels only: recipients must acknowledge; see `acks/{uid}`. */
+  requireAck?: boolean;
+  /** Short description shown in the channel info panel. */
+  description?: string | null;
 }
 
 /** v3 (O5): an on-call member added to a patient channel for the length of their shift. */
@@ -270,6 +281,17 @@ export interface Message {
   lastReplyAt?: TimestampLike | null;
   /** Set by `recallMessage`; body/attachments are then emptied. Clients show "Message recalled". */
   recalledAt?: TimestampLike | null;
+  // --- v4 messaging (all backend-written; the client create shape is unchanged) ---
+  /** Member uids @mentioned in the body (parsed server-side from `@Display Name` / `@role-key`). */
+  mentions?: string[];
+  /** On-call role keys @mentioned (e.g. `oncall-rn-north`); resolved to uids in `mentions`. */
+  mentionRoles?: string[];
+  /** Set by `editMessage` (sender only, within 15 minutes); prior text kept in admin-only `messageEdits`. */
+  editedAt?: TimestampLike | null;
+  /** Template the sender used, if any (set by `onMessageCreated` from a `[[tpl:id]]` marker it strips). */
+  templateId?: string | null;
+  /** Aggregate reaction counts, e.g. {"👍": 3}; maintained from the reactions subcollection. */
+  reactionCounts?: Record<string, number>;
 }
 
 /** Fields a client writes when creating a message. `threadParentId` is optional. */
@@ -1281,7 +1303,11 @@ export interface ResolveTriageCallRequest {
 export interface RecallMessageRequest { orgId: string; channelId: string; messageId: string }
 export interface SearchMessagesRequest { orgId: string; query: string; channelId?: string }
 export interface SearchMessagesResponse { hits: MessageSearchHit[]; truncated: boolean }
-export interface SendBroadcastRequest { orgId: string; name: string; target: BroadcastTarget; body: string; priority: Priority }
+export interface SendBroadcastRequest {
+  orgId: string; name: string; target: BroadcastTarget; body: string; priority: Priority;
+  /** v4: recipients must acknowledge (report via `broadcastAckReport`). */
+  requireAck?: boolean;
+}
 export interface SendBroadcastResponse { channelId: string; messageId: string; recipientCount: number }
 
 export interface SummarizeChannelRequest { orgId: string; channelId: string; sinceHours?: number }
@@ -1750,4 +1776,140 @@ export interface UpdatePatientClinicalRequest {
 export interface UpdatePatientClinicalResponse {
   /** Fields that actually changed (empty when the request matched the record). */
   changed: string[];
+}
+
+
+// ===========================================================================
+// v4 — messaging: templates, quick replies, mentions, preferences, delivery,
+// ack-required broadcasts, pins, directory status, reactions, edits
+// ===========================================================================
+
+export type TemplateCategory =
+  | 'escalation' | 'clinical' | 'visit' | 'end_of_life' | 'orders' | 'family' | 'logistics' | 'quick_reply';
+
+export interface TemplateField {
+  /** Placeholder key used in `body` as `{{key}}`. */
+  key: string;
+  label: string;
+  kind: 'text' | 'multiline' | 'choice' | 'number';
+  options?: string[];
+  required: boolean;
+}
+
+/**
+ * `orgs/{orgId}/messageTemplates/{id}` (admin-managed) and
+ * `orgs/{orgId}/members/{uid}/templates/{id}` (personal, owner-managed).
+ * Built-in placeholders filled by clients from channel context: {{patient}}, {{patientFirst}},
+ * {{codeStatus}}, {{caregiver}}, {{caregiverPhone}}, {{me}}, {{myDiscipline}}, {{time}}, {{date}}.
+ * `fields` adds form inputs (e.g. SBAR S/B/A/R) substituted the same way.
+ */
+export interface MessageTemplate {
+  title: string;
+  category: TemplateCategory;
+  body: string;
+  fields: TemplateField[];
+  /** Priority preselected in the composer. */
+  defaultPriority: Priority;
+  /** Shown only in patient channels when true. */
+  patientContext: boolean;
+  /** Sort order within category. */
+  order: number;
+  active: boolean;
+  createdBy: string;
+  updatedAt: TimestampLike;
+}
+
+/** Default quick replies offered on urgent messages / alert pushes (org may override via templates with category quick_reply). */
+export const DEFAULT_QUICK_REPLIES: readonly string[] = [
+  'Acknowledged', 'On my way', 'Call me', 'Will visit within 1 hour', 'Calling the family now', 'Please call the MD',
+];
+
+export type ChannelNotifyMode = 'all' | 'mentions' | 'urgent_only';
+
+/** `orgs/{orgId}/channels/{channelId}/prefs/{uid}` — self-written by the member. */
+export interface ChannelPrefs {
+  mode: ChannelNotifyMode;
+  /** Normal-priority pushes suppressed until this instant (urgent/critical always delivered). */
+  mutedUntil: TimestampLike | null;
+  updatedAt: TimestampLike;
+}
+
+export type PresenceState = 'available' | 'in_visit' | 'busy' | 'off';
+
+/** Self-written on `members/{uid}` (added to the self-update allowlist). */
+export interface MemberStatus {
+  state: PresenceState;
+  text: string | null;
+  /** Status auto-clears after this instant. */
+  until: TimestampLike | null;
+}
+
+export interface OutOfOffice {
+  until: TimestampLike;
+  delegateUid: string | null;
+  note: string | null;
+}
+
+/** Self-written on `members/{uid}`. */
+export interface NotificationSettings {
+  /** Local quiet hours ("HH:mm") in the org time zone; normal messages don't push. */
+  quietHours: { start: string; end: string } | null;
+  /** When true and the member holds on-call shifts, normal messages don't push outside their shifts. */
+  offShiftQuiet: boolean;
+}
+
+/** `orgs/{orgId}/channels/{channelId}/acks/{uid}` — self-written acknowledgement of an ack-required broadcast. */
+export interface BroadcastAck {
+  messageId: string;
+  ackedAt: TimestampLike;
+}
+
+/** `orgs/{orgId}/channels/{channelId}/messages/{messageId}/reactions/{uid}` — self-written. */
+export interface Reaction {
+  emoji: string;
+  at: TimestampLike;
+}
+
+export const ALLOWED_REACTIONS: readonly string[] = ['👍', '✅', '❤️', '🙏', '👀', '❗'];
+
+export interface PinnedMessage {
+  messageId: string;
+  snippet: string;
+  pinnedBy: string;
+  pinnedAt: TimestampLike;
+}
+
+/** `orgs/{orgId}/reminders/{id}` — "remind me if no reply", written by functions. */
+export interface NoReplyReminder {
+  channelId: string;
+  messageId: string;
+  ownerUid: string;
+  dueAt: TimestampLike;
+  status: 'pending' | 'fired' | 'cancelled';
+}
+
+// v4 callables
+export interface EditMessageRequest { orgId: string; channelId: string; messageId: string; body: string }
+export interface PinMessageRequest { orgId: string; channelId: string; messageId: string; pinned: boolean }
+export interface RenameChannelRequest { orgId: string; channelId: string; name: string }
+export interface LeaveChannelRequest { orgId: string; channelId: string }
+export interface NudgeUnreadRequest { orgId: string; channelId: string; messageId: string }
+export interface NudgeUnreadResponse { nudged: number }
+export interface RemindIfNoReplyRequest { orgId: string; channelId: string; messageId: string; minutes: 15 | 30 | 60 | 120 }
+export interface CancelReminderRequest { orgId: string; reminderId: string }
+export interface SaveTemplateRequest {
+  orgId: string; templateId?: string; scope: 'org' | 'personal';
+  template: Omit<MessageTemplate, 'createdBy' | 'updatedAt'>;
+}
+export interface DeleteTemplateRequest { orgId: string; templateId: string; scope: 'org' | 'personal' }
+export interface BroadcastAckReportRequest { orgId: string; channelId: string; messageId: string }
+export interface BroadcastAckReportResponse {
+  total: number;
+  acked: { uid: string; name: string; ackedAt: TimestampLike }[];
+  pending: { uid: string; name: string }[];
+}
+export interface MessageReadStatusRequest { orgId: string; channelId: string; messageId: string }
+export interface MessageReadStatusResponse {
+  read: { uid: string; name: string; at: TimestampLike }[];
+  unread: { uid: string; name: string }[];
 }
