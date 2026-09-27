@@ -7,6 +7,7 @@ import type {
   Patient,
   RecordDeathRequest,
   RecordRecertificationRequest,
+  RecordRecertificationResponse,
 } from '@shared/types';
 import { useOrgSession } from '../../lib/session';
 import type { WithId } from '../../lib/firestore';
@@ -19,7 +20,7 @@ import {
   LEVEL_OF_CARE_LABELS,
   type BereavementRisk,
 } from '../../lib/constants';
-import { formatDate, optStr, todayISO } from '../../lib/format';
+import { addDaysISO, formatDate, optStr, todayISO } from '../../lib/format';
 import { currentBenefitPeriodNumber } from '../../lib/milestones';
 import { patientName } from '../../lib/patient';
 import { Button, ErrorBanner, Field, MemberSelect, Modal } from '../../components/ui';
@@ -85,13 +86,22 @@ function RecertModal({ patient, onClose }: { patient: WithId<Patient>; onClose: 
   const [certificationDate, setCertDate] = useState(todayISO());
   const [f2fDate, setF2fDate] = useState('');
   const [f2fBy, setF2fBy] = useState('');
+  const [warnings, setWarnings] = useState<string[] | null>(null);
   const period = periods.find((p) => p.number === periodNumber);
+  // S4: the certification must be dated from 15 days before the period starts through its start.
+  const certFrom = period ? addDaysISO(period.start, -15) : '';
+  const f2fOutOfWindow =
+    !!period?.f2fRequired && !!f2fDate && !!period.f2fWindowStart && !!period.f2fDueBy && (f2fDate < period.f2fWindowStart || f2fDate > period.f2fDueBy);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
     if (!period) return act.setError('Choose a benefit period.');
     if (!certifyingPhysician.trim()) return act.setError('Certifying physician is required.');
+    if (certificationDate < certFrom || certificationDate > period.start) {
+      return act.setError(`The certification date for period ${period.number} must be between ${formatDate(certFrom)} and ${formatDate(period.start)}.`);
+    }
     if (period.f2fRequired && !f2fDate) return act.setError('A face-to-face encounter date is required for this period.');
+    if (period.f2fRequired && !f2fBy.trim()) return act.setError('Enter the physician or NP who performed the face-to-face encounter.');
     const req: RecordRecertificationRequest = {
       orgId: s.orgId,
       patientId: patient.id,
@@ -104,7 +114,25 @@ function RecertModal({ patient, onClose }: { patient: WithId<Patient>; onClose: 
       const by = optStr(f2fBy);
       if (by) req.f2fBy = by;
     }
-    if (await act.run(() => call<RecordRecertificationRequest, unknown>('recordRecertification', req))) onClose();
+    let res: RecordRecertificationResponse | null = null;
+    const ok = await act.run(async () => {
+      res = await call<RecordRecertificationRequest, RecordRecertificationResponse>('recordRecertification', req);
+    });
+    if (!ok) return;
+    const w = (res as RecordRecertificationResponse | null)?.warnings ?? [];
+    if (w.length) setWarnings(w);
+    else onClose();
+  }
+
+  if (warnings) {
+    return (
+      <Modal title="Recertification recorded with warnings" onClose={onClose} footer={<Button variant="primary" onClick={onClose}>Close</Button>}>
+        <div className="banner banner-warn">
+          <ul>{warnings.map((w) => <li key={w}>{w}</li>)}</ul>
+        </div>
+        <p className="muted small">The face-to-face milestone stays open until a valid encounter is filed.</p>
+      </Modal>
+    );
   }
 
   if (periods.length === 0) {
@@ -133,8 +161,8 @@ function RecertModal({ patient, onClose }: { patient: WithId<Patient>; onClose: 
           <Field label="Certifying physician">
             <input required value={certifyingPhysician} onChange={(e) => setPhysician(e.target.value)} />
           </Field>
-          <Field label="Certification date">
-            <input type="date" required value={certificationDate} onChange={(e) => setCertDate(e.target.value)} />
+          <Field label="Certification date" hint={period ? `${formatDate(certFrom)} – ${formatDate(period.start)}` : undefined}>
+            <input type="date" required min={certFrom || undefined} max={period?.start} value={certificationDate} onChange={(e) => setCertDate(e.target.value)} />
           </Field>
         </div>
         {period?.f2fRequired && (
@@ -147,10 +175,15 @@ function RecertModal({ patient, onClose }: { patient: WithId<Patient>; onClose: 
               <Field label="F2F date">
                 <input type="date" required value={f2fDate} onChange={(e) => setF2fDate(e.target.value)} />
               </Field>
-              <Field label="Performed by">
-                <input value={f2fBy} onChange={(e) => setF2fBy(e.target.value)} placeholder="Physician or NP" />
+              <Field label="Performed by (attesting physician or NP)">
+                <input required value={f2fBy} onChange={(e) => setF2fBy(e.target.value)} placeholder="Physician or NP" />
               </Field>
             </div>
+            {f2fOutOfWindow && (
+              <div className="banner banner-warn small">
+                This date is outside the F2F window. The recertification will be recorded, but the F2F milestone will stay open.
+              </div>
+            )}
           </fieldset>
         )}
         <Footer onClose={onClose} busy={act.busy} label="Record recertification" />
@@ -169,7 +202,7 @@ function DischargeModal({ patient, onClose }: { patient: WithId<Patient>; onClos
   async function submit(e: FormEvent) {
     e.preventDefault();
     if (!reason) return act.setError('Choose a discharge reason.');
-    if (!window.confirm(`Discharge ${patientName(patient)}? The care team channel will be archived and future visits and open tasks cancelled.`)) return;
+    if (!window.confirm(`Discharge ${patientName(patient)}? Future visits and open tasks will be cancelled, and the care team channel archived after 72 hours.`)) return;
     const req: DischargePatientRequest = { orgId: s.orgId, patientId: patient.id, dischargeDate, reason };
     const n = optStr(notes);
     if (n) req.notes = n;
@@ -202,7 +235,7 @@ function DischargeModal({ patient, onClose }: { patient: WithId<Patient>; onClos
   );
 }
 
-function DeathModal({ patient, onClose }: { patient: WithId<Patient>; onClose: () => void }) {
+function DeathModal({ patient, visitId, onClose }: { patient: WithId<Patient>; visitId?: string; onClose: () => void }) {
   const s = useOrgSession();
   const act = useAction();
   const [date, setDate] = useState(todayISO());
@@ -215,8 +248,9 @@ function DeathModal({ patient, onClose }: { patient: WithId<Patient>; onClose: (
 
   async function submit(e: FormEvent) {
     e.preventDefault();
-    if (!window.confirm(`Record the death of ${patientName(patient)}? This archives the care team channel and starts a bereavement plan.`)) return;
+    if (!window.confirm(`Record the death of ${patientName(patient)}? The care team is notified, the care team channel is archived after 72 hours, and a bereavement plan starts.`)) return;
     const req: RecordDeathRequest = { orgId: s.orgId, patientId: patient.id, date, bereavementRisk: risk };
+    if (visitId) req.visitId = visitId;
     if (time) req.time = time;
     const pb = optStr(pronouncedBy);
     if (pb) req.pronouncedBy = pb;
@@ -232,6 +266,7 @@ function DeathModal({ patient, onClose }: { patient: WithId<Patient>; onClose: (
     <Modal title="Record death" onClose={onClose}>
       <form className="form" onSubmit={submit}>
         <ErrorBanner error={act.error} />
+        {visitId && <div className="banner banner-info small">This visit will be completed, ending at the time of death.</div>}
         <div className="form-grid">
           <Field label="Date of death">
             <input type="date" required value={date} onChange={(e) => setDate(e.target.value)} />
@@ -268,7 +303,18 @@ function DeathModal({ patient, onClose }: { patient: WithId<Patient>; onClose: (
   );
 }
 
-export function LifecycleModal({ action, patient, onClose }: { action: LifecycleAction; patient: WithId<Patient>; onClose: () => void }) {
+export function LifecycleModal({
+  action,
+  patient,
+  visitId,
+  onClose,
+}: {
+  action: LifecycleAction;
+  patient: WithId<Patient>;
+  /** Death only: the visit the death was recorded from (O1). */
+  visitId?: string;
+  onClose: () => void;
+}) {
   switch (action) {
     case 'loc':
       return <LevelOfCareModal patient={patient} onClose={onClose} />;
@@ -277,6 +323,6 @@ export function LifecycleModal({ action, patient, onClose }: { action: Lifecycle
     case 'discharge':
       return <DischargeModal patient={patient} onClose={onClose} />;
     case 'death':
-      return <DeathModal patient={patient} onClose={onClose} />;
+      return <DeathModal patient={patient} visitId={visitId} onClose={onClose} />;
   }
 }

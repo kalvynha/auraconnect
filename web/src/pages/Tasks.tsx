@@ -155,7 +155,8 @@ export default function TasksPage() {
   const [due, setDue] = useState<DueFilter>('any');
   const [assignee, setAssignee] = useState('');
   const [editing, setEditing] = useState<WithId<Task> | 'new' | null>(null);
-  const patients = usePatients(s.orgId);
+  // Active patients only (for new tasks); the filter below also lists patients seen in the loaded tasks.
+  const patients = usePatients(s.orgId, ['admitted', 'referral']);
   const myDiscipline = s.member?.discipline ?? null;
 
   const today = todayISO();
@@ -184,10 +185,11 @@ export default function TasksPage() {
         limit(1000),
       );
     }
-    // History views (done / cancelled / all): per-person queries are naturally bounded;
-    // the org-wide one shows the newest 500.
-    if (who.length) return query(col, ...who);
-    return query(col, orderBy('createdAt', 'desc'), limit(500));
+    // History views (done / cancelled / all) are filtered by status on the server and capped:
+    // per person (tasks(assigneeUid, status, …)) or org-wide newest first (tasks(status, createdAt)).
+    const st = status === 'all' ? [] : [where('status', '==', status)];
+    if (who.length) return query(col, ...who, ...st, limit(500));
+    return query(col, ...st, orderBy('createdAt', 'desc'), limit(500));
   }, [s.orgId, s.user.uid, view, status, due, today, assigneeFilter]);
   const tasks = useLiveQuery<Task>(q, [s.orgId, s.user.uid, view, status, due, today, assigneeFilter]);
 
@@ -214,6 +216,18 @@ export default function TasksPage() {
       .sort((a, b) => (a.dueDate ?? '9999').localeCompare(b.dueDate ?? '9999'));
   }, [tasks.data, view, status, patientId, due, myDiscipline, s.isAdmin, today]);
 
+  // Patient filter: active patients plus any (e.g. discharged/deceased) referenced by the loaded tasks.
+  const filterPatients = useMemo(() => {
+    const known = new Set(patients.data.map((p) => p.id));
+    const extra = new Map<string, { id: string; firstName: string; lastName: string; status: 'admitted' }>();
+    for (const t of tasks.data) {
+      if (t.patientId && !known.has(t.patientId) && !extra.has(t.patientId)) {
+        extra.set(t.patientId, { id: t.patientId, firstName: '', lastName: t.patientName ?? 'Patient', status: 'admitted' });
+      }
+    }
+    return [...patients.data, ...extra.values()];
+  }, [patients.data, tasks.data]);
+
   const tabs: TabDef<View>[] = [
     { key: 'mine', label: 'My tasks' },
     { key: 'unassigned', label: s.isAdmin ? 'Unassigned' : `Unassigned${myDiscipline ? ` (${myDiscipline})` : ''}` },
@@ -235,7 +249,7 @@ export default function TasksPage() {
               ))}
             </div>
             <Field label="Patient" className="field-inline">
-              <PatientSelect patients={patients.data} value={patientId} onChange={setPatientId} placeholder="All patients" />
+              <PatientSelect patients={filterPatients} value={patientId} onChange={setPatientId} placeholder="All patients" />
             </Field>
             {view === 'all' && (
               <Field label="Assignee" className="field-inline">

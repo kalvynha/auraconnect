@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { limit, orderBy, query, where } from 'firebase/firestore';
 import type {
@@ -11,10 +11,12 @@ import type {
   OnCallRole,
   Patient,
   Priority,
+  TriageCall,
 } from '@shared/types';
+import { ResolveModal } from './Triage';
 import { useOrgSession } from '../lib/session';
-import { orgCol, type WithId } from '../lib/firestore';
-import { useLiveQuery } from '../lib/hooks';
+import { orgCol, orgDoc, type WithId } from '../lib/firestore';
+import { useLiveDoc, useLiveQuery } from '../lib/hooks';
 import { call } from '../lib/firebase';
 import { PRIORITIES } from '../lib/constants';
 import { errorMessage, formatDate, formatInstant } from '../lib/format';
@@ -129,7 +131,35 @@ function AlertSourceLine({ a }: { a: Alert }) {
         Deadline: {MILESTONE_LABELS[src.milestone] ?? src.milestone} due {formatDate(src.dueDate)}
       </Link>
     );
+  if (src.type === 'triage') {
+    return (
+      <>
+        <Link to="/triage">Triage call</Link>
+        {src.patientId && <> · <Link to={`/patients/${src.patientId}`}>patient</Link></>}
+      </>
+    );
+  }
+  if (src.type === 'visit_missed') return <Link to={`/patients/${src.patientId}`}>Missed visit</Link>;
   return src.patientId ? <Link to={`/patients/${src.patientId}`}>Manual · patient</Link> : <span>Manual</span>;
+}
+
+/**
+ * O3: resolving a triage alert opens the call's resolve form (disposition, note, PRN visit, follow-up);
+ * resolving the call resolves the alert. If the call is already resolved, the alert is resolved directly.
+ */
+function TriageResolve({ callId, onDone, onFallback }: { callId: string; onDone: () => void; onFallback: () => void }) {
+  const s = useOrgSession();
+  const call = useLiveDoc<TriageCall>(orgDoc(s.orgId, 'triageCalls', callId), [s.orgId, callId]);
+  const open = !!call.data && call.data.status === 'open';
+  const seenOpen = useRef(false);
+  if (open) seenOpen.current = true;
+  useEffect(() => {
+    // Resolved while the form was open (here or elsewhere): the server resolved the alert too.
+    if (!call.loading && !open) (seenOpen.current ? onDone : onFallback)();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [call.loading, open]);
+  if (call.loading || !call.data || !open) return null;
+  return <ResolveModal tc={call.data} onClose={onDone} />;
 }
 
 function AlertCard({ a }: { a: WithId<Alert> }) {
@@ -137,7 +167,9 @@ function AlertCard({ a }: { a: WithId<Alert> }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showHistory, setShowHistory] = useState(false);
+  const [resolvingCall, setResolvingCall] = useState(false);
   const canAct = s.isAdmin || a.targetUids.includes(s.user.uid);
+  const triageCallId = a.source.type === 'triage' ? a.source.callId : null;
 
   async function act(name: 'ackAlert' | 'resolveAlert') {
     setBusy(name);
@@ -191,10 +223,20 @@ function AlertCard({ a }: { a: WithId<Alert> }) {
               Acknowledge
             </Button>
           )}
-          <Button small busy={busy === 'resolveAlert'} onClick={() => void act('resolveAlert')}>
-            Resolve
+          <Button small busy={busy === 'resolveAlert'} onClick={() => (triageCallId ? setResolvingCall(true) : void act('resolveAlert'))}>
+            {triageCallId ? 'Resolve call…' : 'Resolve'}
           </Button>
         </div>
+      )}
+      {resolvingCall && triageCallId && (
+        <TriageResolve
+          callId={triageCallId}
+          onDone={() => setResolvingCall(false)}
+          onFallback={() => {
+            setResolvingCall(false);
+            void act('resolveAlert');
+          }}
+        />
       )}
     </div>
   );

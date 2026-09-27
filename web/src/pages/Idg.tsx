@@ -3,6 +3,13 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { limit, orderBy, query } from 'firebase/firestore';
 import type {
   CompleteIdgMeetingRequest,
+  CompleteIdgMeetingResponse,
+  Discipline,
+  GenerateIdgPrepResponse,
+  IdgAiPrepNote,
+  IdgDisciplineNote,
+  IdgNoteDoc,
+  SaveIdgDisciplineNoteRequest,
   CreateIdgMeetingRequest,
   GenerateIdgPrepRequest,
   IdResponse,
@@ -19,7 +26,7 @@ import { orgCol, orgDoc, type WithId } from '../lib/firestore';
 import { useAction, useLiveDoc, useLiveQuery } from '../lib/hooks';
 import { usePatients } from '../lib/queries';
 import { call } from '../lib/firebase';
-import { CLINICAL_ROLES, orgSettings } from '../lib/constants';
+import { CLINICAL_ROLES, DISCIPLINES, orgSettings } from '../lib/constants';
 import { addDaysISO, dueState, formatDate, formatInstant, toDateTimeLocal, toISODate, tsToDate } from '../lib/format';
 import { patientName } from '../lib/patient';
 import {
@@ -295,22 +302,94 @@ function NoteForm({
   );
 }
 
+/** Prep is "fresh" (skipped by Generate prep for all) when generated within this many hours. */
+const FRESH_PREP_HOURS = 12;
+/** Patients per generateIdgPrep call (the server's cap). */
+const PREP_BATCH = 25;
+
+/**
+ * F5: per-discipline notes, one document each (`notes/{patientId}_{discipline}`), so two clinicians
+ * saving at once never overwrite each other.
+ */
+function DisciplineNotes({
+  meeting,
+  patientId,
+  notes,
+  editable,
+}: {
+  meeting: WithId<IdgMeeting>;
+  patientId: string;
+  notes: IdgDisciplineNote[];
+  editable: boolean;
+}) {
+  const s = useOrgSession();
+  const act = useAction();
+  const mineDefault = (s.member?.discipline ?? 'RN') as Discipline;
+  const [discipline, setDiscipline] = useState<Discipline>(mineDefault);
+  const existing = notes.find((n) => n.discipline === discipline);
+  const [text, setText] = useState(existing?.text ?? '');
+  const [dirty, setDirty] = useState(false);
+  useEffect(() => {
+    if (!dirty) setText(existing?.text ?? '');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [discipline, existing?.updatedAt?.seconds]);
+
+  async function save() {
+    const req: SaveIdgDisciplineNoteRequest = { orgId: s.orgId, meetingId: meeting.id, patientId, discipline, text: text.trim() };
+    if (await act.run(() => call<SaveIdgDisciplineNoteRequest, unknown>('saveIdgDisciplineNote', req))) setDirty(false);
+  }
+
+  const sorted = [...notes].filter((n) => n.text).sort((a, b) => a.discipline.localeCompare(b.discipline));
+  return (
+    <div className="form">
+      <div className="field-label">Discipline notes</div>
+      {sorted.length === 0 && <p className="muted small">None yet.</p>}
+      {sorted.map((n) => (
+        <div key={n.discipline} className="list-row">
+          <strong>{n.discipline}</strong> <span className="muted small">· {s.memberName(n.updatedBy)} · {formatInstant(n.updatedAt)}</span>
+          <div style={{ whiteSpace: 'pre-wrap' }}>{n.text}</div>
+        </div>
+      ))}
+      {editable && (
+        <>
+          <ErrorBanner error={act.error} />
+          <div className="row gap-sm">
+            <select value={discipline} aria-label="Discipline" onChange={(e) => { setDirty(false); setDiscipline(e.target.value as Discipline); }}>
+              {DISCIPLINES.map((d) => <option key={d} value={d}>{d}</option>)}
+            </select>
+            <span className="muted small">{existing ? `Editing the ${discipline} note` : `New ${discipline} note`}</span>
+          </div>
+          <textarea rows={2} value={text} onChange={(e) => { setDirty(true); setText(e.target.value); }} placeholder={`${discipline} update for the team`} />
+          <div>
+            <Button small busy={act.busy} disabled={!dirty} onClick={() => void save()}>Save {discipline} note</Button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function AgendaItem({
   meeting,
   patientId,
   patient,
   editable,
   canPrep,
+  prep: prepDoc,
+  disciplineNotes,
 }: {
   meeting: WithId<IdgMeeting>;
   patientId: string;
   patient: WithId<Patient> | undefined;
   editable: boolean;
   canPrep: boolean;
+  prep: IdgAiPrepNote | undefined;
+  disciplineNotes: IdgDisciplineNote[];
 }) {
   const s = useOrgSession();
   const prepAct = useAction();
-  const prep = meeting.aiPrep?.[patientId];
+  // v3 prep lives in the notes subcollection; older meetings kept it on the meeting doc.
+  const prep = prepDoc ?? meeting.aiPrep?.[patientId];
   const note = meeting.notes?.[patientId];
   const name = meeting.patientNames?.[patientId] ?? (patient ? patientName(patient) : 'Patient');
   const [showPrep, setShowPrep] = useState(true);
@@ -377,6 +456,7 @@ function AgendaItem({
           </Button>
         )
       )}
+      <DisciplineNotes meeting={meeting} patientId={patientId} notes={disciplineNotes} editable={editable} />
       <NoteForm meeting={meeting} patientId={patientId} note={note} editable={editable} />
     </Card>
   );
@@ -386,18 +466,64 @@ function MeetingView({ meetingId }: { meetingId: string }) {
   const s = useOrgSession();
   const navigate = useNavigate();
   const { data: meeting, loading, error } = useLiveDoc<IdgMeeting>(orgDoc(s.orgId, 'idgMeetings', meetingId), [s.orgId, meetingId]);
-  const patients = usePatients(s.orgId, ['admitted', 'discharged', 'deceased']);
+  // Bounded: admitted patients only (used for review dates and care-team checks).
+  const patients = usePatients(s.orgId, ['admitted']);
+  const notes = useLiveQuery<IdgNoteDoc>(orgCol(s.orgId, 'idgMeetings', meetingId, 'notes'), [s.orgId, meetingId]);
   const prepAct = useAction();
   const completeAct = useAction();
   const [editing, setEditing] = useState(false);
+  const [prepProgress, setPrepProgress] = useState<string | null>(null);
+  const [warnings, setWarnings] = useState<string[]>([]);
   const clinical = CLINICAL_ROLES.includes(s.role);
+  const prepByPatient = useMemo(() => {
+    const m = new Map<string, IdgAiPrepNote>();
+    for (const n of notes.data) if (n.kind === 'ai_prep') m.set(n.patientId, n);
+    return m;
+  }, [notes.data]);
+  const disciplineByPatient = useMemo(() => {
+    const m = new Map<string, IdgDisciplineNote[]>();
+    for (const n of notes.data) if (n.kind === 'discipline') m.set(n.patientId, [...(m.get(n.patientId) ?? []), n]);
+    return m;
+  }, [notes.data]);
 
   if (loading) return <Loading />;
   if (!meeting) return <Page title="IDG meeting"><ErrorBanner error={error ?? 'Meeting not found.'} /></Page>;
 
   const open = meeting.status === 'scheduled';
   const editable = clinical && open;
+  // H3: attendee/agenda edits are for the creator or an admin; prep is for the patient's care team or an admin.
+  const canEditMeeting = editable && (s.isAdmin || meeting.createdBy === s.user.uid);
+  const canPrepFor = (pid: string) => editable && (s.isAdmin || !!patients.data.find((p) => p.id === pid)?.careTeamUids.includes(s.user.uid));
   const reviewedCount = meeting.patientIds.filter((id) => meeting.notes?.[id]?.reviewed).length;
+
+  /** F5: generate prep for every agenda patient I may prep, 25 per call, skipping fresh prep. */
+  async function prepAll() {
+    if (!meeting) return;
+    const freshSince = Date.now() - FRESH_PREP_HOURS * 3_600_000;
+    const pending = meeting.patientIds.filter((pid) => {
+      if (!canPrepFor(pid)) return false;
+      const p = prepByPatient.get(pid);
+      return !(p && tsToDate(p.generatedAt) && tsToDate(p.generatedAt)!.getTime() >= freshSince);
+    });
+    if (pending.length === 0) return prepAct.setError('Every patient you can prep already has prep from the last 12 hours.');
+    let done = 0;
+    let failed = 0;
+    await prepAct.run(async () => {
+      for (let i = 0; i < pending.length; i += PREP_BATCH) {
+        const batch = pending.slice(i, i + PREP_BATCH);
+        setPrepProgress(`Generating prep… ${done} of ${pending.length} done`);
+        const res = await call<GenerateIdgPrepRequest, GenerateIdgPrepResponse>('generateIdgPrep', {
+          orgId: s.orgId,
+          meetingId: meeting.id,
+          patientIds: batch,
+          skipFreshHours: FRESH_PREP_HOURS,
+        });
+        done += res.generatedPatientIds.length + (res.skippedPatientIds?.length ?? 0);
+        failed += res.failedPatientIds.length;
+      }
+    });
+    setPrepProgress(`Prep ready for ${done} of ${pending.length} patient(s)${failed ? `; ${failed} failed (try again)` : ''}.`);
+  }
 
   async function complete() {
     if (!meeting) return;
@@ -406,7 +532,10 @@ function MeetingView({ meetingId }: { meetingId: string }) {
       `Complete this meeting? It will be locked. ${reviewedCount} reviewed patient(s) will have their IDG dates updated and action items turned into tasks.` +
       (unreviewed ? ` ${unreviewed} patient(s) are not marked reviewed and will not be updated.` : '');
     if (!window.confirm(msg)) return;
-    await completeAct.run(() => call<CompleteIdgMeetingRequest, unknown>('completeIdgMeeting', { orgId: s.orgId, meetingId: meeting.id }));
+    await completeAct.run(async () => {
+      const res = await call<CompleteIdgMeetingRequest, CompleteIdgMeetingResponse>('completeIdgMeeting', { orgId: s.orgId, meetingId: meeting.id });
+      setWarnings(res?.warnings ?? []);
+    });
   }
 
   return (
@@ -415,22 +544,19 @@ function MeetingView({ meetingId }: { meetingId: string }) {
       actions={
         <>
           <Button onClick={() => navigate('/idg')}>← Meetings</Button>
-          {editable && <Button onClick={() => setEditing(true)}>Edit</Button>}
-          {editable && (
-            <Button
-              busy={prepAct.busy}
-              onClick={() =>
-                void prepAct.run(() => call<GenerateIdgPrepRequest, unknown>('generateIdgPrep', { orgId: s.orgId, meetingId: meeting.id }))
-              }
-            >
-              Generate AI prep
+          {canEditMeeting && <Button onClick={() => setEditing(true)}>Edit</Button>}
+          {editable && meeting.patientIds.some(canPrepFor) && (
+            <Button busy={prepAct.busy} onClick={() => void prepAll()}>
+              Generate prep for all
             </Button>
           )}
           {editable && <Button variant="primary" busy={completeAct.busy} onClick={() => void complete()}>Complete meeting</Button>}
         </>
       }
     >
-      <ErrorBanner error={error ?? prepAct.error ?? completeAct.error ?? patients.error} />
+      <ErrorBanner error={error ?? prepAct.error ?? completeAct.error ?? patients.error ?? notes.error} />
+      {warnings.map((w) => <div key={w} className="banner banner-warn">{w}</div>)}
+      {prepProgress && !prepAct.busy && <div className="banner banner-info">{prepProgress}</div>}
       <div className="row gap wrap summary">
         <Badge value={meeting.status} tone={open ? 'info' : 'ok'} />
         <span>{formatInstant(meeting.scheduledAt)}</span>
@@ -438,7 +564,7 @@ function MeetingView({ meetingId }: { meetingId: string }) {
         <span className="muted">{reviewedCount} of {meeting.patientIds.length} reviewed</span>
         {meeting.completedAt && <span className="muted">Completed {formatInstant(meeting.completedAt)} by {s.memberName(meeting.completedBy)}</span>}
       </div>
-      {prepAct.busy && <div className="banner banner-info">Generating AI prep packets… this can take a minute.</div>}
+      {prepAct.busy && <div className="banner banner-info">{prepProgress ?? 'Generating AI prep packets…'} This can take a few minutes.</div>}
       {!open && <div className="banner banner-info">This meeting is completed and locked.</div>}
       {meeting.patientIds.length === 0 && <p className="muted">No patients on the agenda.</p>}
       {meeting.patientIds.map((pid) => (
@@ -448,7 +574,9 @@ function MeetingView({ meetingId }: { meetingId: string }) {
           patientId={pid}
           patient={patients.data.find((p) => p.id === pid)}
           editable={editable}
-          canPrep={editable}
+          canPrep={canPrepFor(pid)}
+          prep={prepByPatient.get(pid)}
+          disciplineNotes={disciplineByPatient.get(pid) ?? []}
         />
       ))}
       {editing && <MeetingModal meeting={meeting} onClose={() => setEditing(false)} />}

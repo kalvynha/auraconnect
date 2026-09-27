@@ -1,18 +1,23 @@
 import { useState, type FormEvent } from 'react';
-import { signInWithEmailLink, updatePassword } from 'firebase/auth';
+import { fetchSignInMethodsForEmail, getAdditionalUserInfo, signInWithEmailLink, updatePassword } from 'firebase/auth';
 import { auth } from '../lib/firebase';
 import { errorMessage } from '../lib/format';
 import { Button, ErrorBanner, Field } from '../components/ui';
 
 /**
  * Landing page for invitation emails. Completes email-link sign-in (which also
- * verifies the address), lets the invitee set a password for the iOS app, then
+ * verifies the address), has the invitee set a password for the iOS app, then
  * hands off to onboarding where the pending invite can be accepted.
+ *
+ * M5: if the address already had an account (someone may have registered it with a
+ * password before the real owner got the invite), setting a new password is required —
+ * there is no "Skip" — so a previously set password stops working.
  */
 export default function FinishSignInPage({ onDone }: { onDone: () => void }) {
   const params = new URLSearchParams(window.location.search);
   const [email, setEmail] = useState(params.get('email') ?? '');
   const [signedIn, setSignedIn] = useState(false);
+  const [mustReset, setMustReset] = useState(false);
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
   const [busy, setBusy] = useState(false);
@@ -23,7 +28,11 @@ export default function FinishSignInPage({ onDone }: { onDone: () => void }) {
     setBusy(true);
     setError(null);
     try {
-      await signInWithEmailLink(auth, email.trim(), window.location.href);
+      // Best effort: returns [] when email-enumeration protection is on; isNewUser covers that case.
+      const methods = await fetchSignInMethodsForEmail(auth, email.trim()).catch(() => [] as string[]);
+      const cred = await signInWithEmailLink(auth, email.trim(), window.location.href);
+      const isNewUser = getAdditionalUserInfo(cred)?.isNewUser ?? false;
+      setMustReset(methods.includes('password') || !isNewUser);
       setSignedIn(true);
     } catch (err) {
       setError(errorMessage(err));
@@ -39,7 +48,8 @@ export default function FinishSignInPage({ onDone }: { onDone: () => void }) {
     setBusy(true);
     setError(null);
     try {
-      if (auth.currentUser) await updatePassword(auth.currentUser, password);
+      if (!auth.currentUser) throw new Error('Your sign-in expired. Open the invitation link again.');
+      await updatePassword(auth.currentUser, password);
       finish();
     } catch (err) {
       setError(errorMessage(err));
@@ -55,7 +65,7 @@ export default function FinishSignInPage({ onDone }: { onDone: () => void }) {
   return (
     <div className="center-screen">
       <div className="auth-card">
-        <h1>{signedIn ? 'Set your password' : 'Accept your invitation'}</h1>
+        <h1>{signedIn ? (mustReset ? 'Choose a new password' : 'Set your password') : 'Accept your invitation'}</h1>
         <ErrorBanner error={error} />
         {!signedIn ? (
           <form className="form" onSubmit={completeSignIn}>
@@ -67,9 +77,16 @@ export default function FinishSignInPage({ onDone }: { onDone: () => void }) {
           </form>
         ) : (
           <form className="form" onSubmit={savePassword}>
-            <p className="muted">
-              Your email is verified. Choose a password so you can also sign in to the AuraConnect iOS app.
-            </p>
+            {mustReset ? (
+              <div className="banner banner-warn">
+                An account already existed for this email. For your security, choose a new password now; any
+                password set before this invitation will stop working.
+              </div>
+            ) : (
+              <p className="muted">
+                Your email is verified. Choose a password so you can also sign in to the AuraConnect iOS app.
+              </p>
+            )}
             <Field label="Password">
               <input type="password" required autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} />
             </Field>
@@ -78,7 +95,7 @@ export default function FinishSignInPage({ onDone }: { onDone: () => void }) {
             </Field>
             <div className="row gap">
               <Button type="submit" variant="primary" busy={busy}>Save and continue</Button>
-              <Button type="button" variant="ghost" onClick={finish}>Skip for now</Button>
+              {!mustReset && <Button type="button" variant="ghost" onClick={finish}>Skip for now</Button>}
             </div>
           </form>
         )}

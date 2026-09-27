@@ -410,3 +410,10 @@ div.stat:hover { border-color: var(--border); }
   .stat-value, .stat-danger { color: #000 !important; }
   .clamp { -webkit-line-clamp: unset !important; display: block !important; overflow: visible !important; }
 }
+
+/* v3 visits: selection, clinician lanes, plan preview */
+.visit-chip.visit-chip-selected { outline: 2px solid var(--primary); outline-offset: 1px; }
+.lane-grid { display: grid; gap: 6px; overflow-x: auto; }
+.plan-grid-wrap { overflow-x: auto; max-height: 60vh; }
+.plan-grid td { vertical-align: top; min-width: 110px; }
+.plan-grid .visit-chip { cursor: default; margin-bottom: 4px; }

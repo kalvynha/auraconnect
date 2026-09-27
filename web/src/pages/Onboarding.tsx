@@ -18,6 +18,8 @@ import { Badge, Button, Card, ErrorBanner, Field, Loading } from '../components/
 export default function OnboardingPage() {
   const s = useSession();
   const [invites, setInvites] = useState<MyInvite[] | null>(null);
+  /** L2: the server lists invites only for a verified email. */
+  const [verificationRequired, setVerificationRequired] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
@@ -47,16 +49,22 @@ export default function OnboardingPage() {
     await s.user.getIdToken(true);
     setVerified(s.user.emailVerified);
     if (!s.user.emailVerified) setVerifyNote('Not verified yet — open the link in the email, then try again.');
+    else loadInvites();
   }
 
-  useEffect(() => {
+  function loadInvites() {
     call<Record<string, never>, ListMyInvitesResponse>('listMyInvites', {})
-      .then((r) => setInvites(r.invites))
+      .then((r) => {
+        setInvites(r.invites);
+        setVerificationRequired(!!r.verificationRequired);
+      })
       .catch((err) => {
         setInvites([]);
         setError(errorMessage(err));
       });
-  }, []);
+  }
+
+  useEffect(loadInvites, []);
 
   async function finish() {
     await s.user?.getIdToken(true);
@@ -115,8 +123,17 @@ export default function OnboardingPage() {
         <Card title="Pending invitations">
           {invites === null ? (
             <Loading />
+          ) : verificationRequired && !verified ? (
+            <div className="form">
+              <p className="muted">Verify your email address to see invitations sent to {s.user?.email}.</p>
+              {verifyNote && <p className="muted">{verifyNote}</p>}
+              <div className="row">
+                <Button small onClick={() => void sendVerification()}>Send verification email</Button>
+                <Button small variant="ghost" onClick={() => void checkVerified()}>I've verified</Button>
+              </div>
+            </div>
           ) : invites.length === 0 ? (
-            <p className="muted">No pending invitations for {s.user?.email}.</p>
+            <p className="muted">No pending invitations for {s.user?.email}. To join your hospice, ask your administrator for an invite.</p>
           ) : (
             <>
             {!verified && (

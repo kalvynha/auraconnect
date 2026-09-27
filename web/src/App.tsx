@@ -2,7 +2,7 @@ import { useState, type ReactNode } from 'react';
 import { isSignInWithEmailLink } from 'firebase/auth';
 import { Navigate, NavLink, Outlet, Route, Routes } from 'react-router-dom';
 import type { Role } from '@shared/types';
-import { useSession } from './lib/session';
+import { useSession, type Session } from './lib/session';
 import { auth } from './lib/firebase';
 import { FINISH_SIGN_IN_PATH } from './lib/invites';
 import FinishSignInPage from './pages/FinishSignIn';
@@ -31,11 +31,15 @@ import TriagePage from './pages/Triage';
 import HandoffPage from './pages/Handoff';
 import VolunteersPage from './pages/Volunteers';
 import SettingsPage from './pages/Settings';
+import ComplianceReportPage from './pages/ComplianceReport';
+import CensusReportPage from './pages/CensusReport';
 
 interface NavItem {
   to: string;
   label: string;
   roles?: readonly Role[];
+  /** Extra visibility check (capabilities, discipline). */
+  show?: (s: Session) => boolean;
 }
 
 const NAV: NavItem[] = [
@@ -49,7 +53,8 @@ const NAV: NavItem[] = [
   { to: '/idg', label: 'IDG meetings' },
   { to: '/bereavement', label: 'Bereavement' },
   { to: '/handoff', label: 'Shift handoff' },
-  { to: '/volunteers', label: 'Volunteers' },
+  // C2: volunteer coordinators (capability), admins, and volunteers (their own assignments and time).
+  { to: '/volunteers', label: 'Volunteers', show: (s) => s.isAdmin || !!s.member?.capabilities?.includes('volunteers') || s.member?.discipline === 'Volunteer' },
   { to: '/referrals', label: 'Referrals', roles: INTAKE_ROLES },
   { to: '/schedule', label: 'On-call schedule' },
   { to: '/members', label: 'Members', roles: ['admin'] },
@@ -57,6 +62,9 @@ const NAV: NavItem[] = [
   { to: '/policies', label: 'Escalation policies', roles: ['admin'] },
   { to: '/settings', label: 'Settings', roles: ['admin'] },
   { to: '/audit', label: 'Audit log', roles: ['admin'] },
+  // L4: compliance/census reports for admins and the `reports` capability.
+  { to: '/reports/compliance', label: 'Compliance report', show: (s) => s.isAdmin || !!s.member?.capabilities?.includes('reports') },
+  { to: '/reports/census', label: 'Census report', show: (s) => s.isAdmin || !!s.member?.capabilities?.includes('reports') },
 ];
 
 function Layout() {
@@ -72,7 +80,7 @@ function Layout() {
           </div>
         </div>
         <nav>
-          {NAV.filter((n) => !n.roles || (s.role && n.roles.includes(s.role))).map((n) => (
+          {NAV.filter((n) => (!n.roles || (s.role && n.roles.includes(s.role))) && (!n.show || n.show(s))).map((n) => (
             <NavLink key={n.to} to={n.to} end={n.to === '/'} className={({ isActive }) => (isActive ? 'active' : '')}>
               {n.label}
             </NavLink>
@@ -177,6 +185,8 @@ export default function App() {
         <Route path="teams" element={<RequireRole roles={ADMIN}><TeamsPage /></RequireRole>} />
         <Route path="policies" element={<RequireRole roles={ADMIN}><PoliciesPage /></RequireRole>} />
         <Route path="audit" element={<RequireRole roles={ADMIN}><AuditLogPage /></RequireRole>} />
+        <Route path="reports/compliance" element={<ComplianceReportPage />} />
+        <Route path="reports/census" element={<CensusReportPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

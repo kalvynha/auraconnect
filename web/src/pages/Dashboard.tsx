@@ -11,6 +11,7 @@ import { INTAKE_ROLES, LEVELS_OF_CARE, LEVEL_OF_CARE_LABELS } from '../lib/const
 import { addDaysISO, formatDate, formatInstant, formatMinutes, todayISO } from '../lib/format';
 import { openDeadlines } from '../lib/milestones';
 import { Badge, Button, Card, ErrorBanner, Page, Sparkline, Table } from '../components/ui';
+import { useHasCapability } from '../lib/capabilities';
 
 function pct(n: number, d: number): string {
   return d > 0 ? `${Math.round((n / d) * 100)}%` : '—';
@@ -235,6 +236,8 @@ function Stat({ label, value, to, loading }: { label: string; value: number; to:
 export default function DashboardPage() {
   const s = useOrgSession();
   const canReferrals = INTAKE_ROLES.includes(s.role);
+  // Metrics docs are readable by admins and the `reports` capability (firestore.rules).
+  const canReports = useHasCapability('reports');
 
   const alerts = useLiveQuery<Alert>(
     query(orgCol(s.orgId, 'alerts'), where('targetUids', 'array-contains', s.user.uid), where('status', '==', 'open'), orderBy('createdAt', 'desc')),
@@ -286,7 +289,15 @@ export default function DashboardPage() {
         <Stat label="My open tasks" value={openTasks} to="/tasks" loading={myTasks.loading} />
       </div>
 
-      {s.isAdmin && <AdminMetrics />}
+      {canReports && <AdminMetrics />}
+      {canReports && (
+        <Card title="Reports">
+          <div className="row gap wrap">
+            <Link to="/reports/compliance">Compliance report (NOE, recert, F2F, HOPE timeliness)</Link>
+            <Link to="/reports/census">Census, admissions and discharges</Link>
+          </div>
+        </Card>
+      )}
 
       <Card
         title={window_ === 'overdue' ? 'Deadlines: all overdue' : `Deadlines: overdue and next ${window_} days`}

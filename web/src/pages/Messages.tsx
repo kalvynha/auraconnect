@@ -10,10 +10,14 @@ import {
   setDoc,
   where,
 } from 'firebase/firestore';
-import { getDownloadURL, ref as storageRef } from 'firebase/storage';
 import type {
   AiTextResult,
+  Alert,
+  AlertActionRequest,
   Attachment,
+  JoinPatientChannelForCoverageRequest,
+  JoinPatientChannelForCoverageResponse,
+  Patient,
   BroadcastTarget,
   Channel,
   CreateChannelRequest,
@@ -36,10 +40,12 @@ import type {
 import { useOrgSession, type OrgSession } from '../lib/session';
 import { orgCol, orgDoc, type WithId } from '../lib/firestore';
 import { useAction, useLiveDoc, useLiveQuery } from '../lib/hooks';
-import { call, storage } from '../lib/firebase';
+import { call } from '../lib/firebase';
 import { DISCIPLINES, PRIORITIES } from '../lib/constants';
 import { errorMessage, formatInstant, formatTime, tsMillis, tsToDate } from '../lib/format';
 import { AiResultView, Badge, Button, ErrorBanner, Field, MemberPicker, MemberSelect, Modal } from '../components/ui';
+import { FileViewer } from '../components/FileViewer';
+import { patientName } from '../lib/patient';
 
 const MAX_BODY = 8000;
 
@@ -78,24 +84,49 @@ function ChannelRow({ c, active, onClick }: { c: WithId<Channel>; active: boolea
   );
 }
 
+/** M2: attachments are fetched with auth (`getBlob`) and shown from an object URL; no download URLs. */
 function AttachmentLink({ a }: { a: Attachment }) {
-  const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState(false);
   return (
-    <button
-      type="button"
-      className="attachment"
-      disabled={busy}
-      onClick={async () => {
-        setBusy(true);
-        try {
-          window.open(await getDownloadURL(storageRef(storage, a.storagePath)), '_blank', 'noopener');
-        } finally {
-          setBusy(false);
-        }
-      }}
-    >
-      📎 {a.name}
-    </button>
+    <>
+      <button type="button" className="attachment" onClick={() => setOpen(true)}>
+        📎 {a.name}
+      </button>
+      {open && (
+        <Modal title={a.name} onClose={() => setOpen(false)} wide>
+          <FileViewer storagePath={a.storagePath} contentType={a.contentType} title={a.name} />
+        </Modal>
+      )}
+    </>
+  );
+}
+
+/**
+ * O2: inline Acknowledge for an urgent/critical message whose alert targets me and is still open.
+ * The alert is readable only by its recipients (and admins), so for anyone else the listener fails
+ * quietly and nothing is shown. Replying in the channel also acknowledges (server side).
+ */
+function MessageAck({ alertId }: { alertId: string }) {
+  const s = useOrgSession();
+  const act = useAction();
+  const alert = useLiveDoc<Alert>(orgDoc(s.orgId, 'alerts', alertId), [s.orgId, alertId]);
+  const a = alert.data;
+  if (!a || !a.targetUids.includes(s.user.uid)) return null;
+  if (a.status !== 'open') {
+    return <span className="muted small">{a.ackedBy ? `Acknowledged by ${a.ackedBy === s.user.uid ? 'you' : s.memberName(a.ackedBy)}` : a.status}</span>;
+  }
+  return (
+    <>
+      <Button
+        small
+        variant="primary"
+        busy={act.busy}
+        onClick={() => void act.run(() => call<AlertActionRequest, unknown>('ackAlert', { orgId: s.orgId, alertId }))}
+      >
+        Acknowledge
+      </Button>
+      <ErrorBanner error={act.error} />
+    </>
   );
 }
 
@@ -197,6 +228,7 @@ function MessageBubble({
   const recalled = !!m.recalledAt;
   const canRecall = !recalled && s.role !== 'viewer' && (mine || s.isAdmin);
   const replies = m.replyCount ?? 0;
+  const needsAck = !recalled && !mine && !!m.alertId && m.priority !== 'normal';
 
   async function doRecall() {
     if (!window.confirm('Recall this message? Its text and attachments are removed for everyone.')) return;
@@ -227,8 +259,9 @@ function MessageBubble({
         </>
       )}
       <ErrorBanner error={recall.error} />
-      {(onThread || canRecall) && (
+      {(onThread || canRecall || needsAck) && (
         <div className="msg-actions">
+          {needsAck && m.alertId && <MessageAck alertId={m.alertId} />}
           {onThread && replies > 0 && (
             <button type="button" className="link small" onClick={onThread}>
               {replies} {replies === 1 ? 'reply' : 'replies'}{m.lastReplyAt ? ` · last ${formatTime(m.lastReplyAt)}` : ''}
@@ -510,9 +543,9 @@ function BroadcastModal({ onClose, onOpen }: { onClose: () => void; onOpen: (cha
         <Field label="Message">
           <textarea rows={4} maxLength={MAX_BODY} value={body} onChange={(e) => setBody(e.target.value)} required />
         </Field>
-        <Field label="Priority">
+        <Field label="Priority" hint={s.isAdmin ? undefined : 'Critical broadcasts can be sent only by an administrator.'}>
           <select value={priority} onChange={(e) => setPriority(e.target.value as Priority)}>
-            {PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
+            {PRIORITIES.filter((p) => s.isAdmin || p !== 'critical').map((p) => <option key={p} value={p}>{p}</option>)}
           </select>
         </Field>
         <p className="muted small">Recipients can read the broadcast but cannot reply in it.</p>
@@ -618,6 +651,74 @@ function NewConversationModal({ onClose, onOpen }: { onClose: () => void; onOpen
   );
 }
 
+/**
+ * O5: opening a patient's care-team channel you're not in. The channel itself is unreadable, so the
+ * patient is found by `channelId` (staff can read patients). On-call staff on shift (and admins) can
+ * join for the rest of their shift with a reason; the server checks the shift and audits the access.
+ */
+function NotMemberView({ channelId }: { channelId: string }) {
+  const s = useOrgSession();
+  const act = useAction();
+  // Volunteers can only read their assigned patients, so the lookup is skipped for them.
+  const isVolunteer = !s.isAdmin && s.member?.discipline === 'Volunteer';
+  const patients = useLiveQuery<Patient>(
+    isVolunteer ? null : query(orgCol(s.orgId, 'patients'), where('channelId', '==', channelId), limit(1)),
+    [s.orgId, channelId, isVolunteer],
+  );
+  const patient = patients.data[0] ?? null;
+  const [reason, setReason] = useState('');
+  const [joined, setJoined] = useState<JoinPatientChannelForCoverageResponse | null>(null);
+
+  async function join(e: FormEvent) {
+    e.preventDefault();
+    if (!patient) return;
+    if (reason.trim().length < 3) return act.setError('Enter a reason for access.');
+    let res: JoinPatientChannelForCoverageResponse | null = null;
+    const ok = await act.run(async () => {
+      res = await call<JoinPatientChannelForCoverageRequest, JoinPatientChannelForCoverageResponse>('joinPatientChannelForCoverage', {
+        orgId: s.orgId,
+        patientId: patient.id,
+        reason: reason.trim(),
+      });
+    });
+    if (ok) setJoined(res);
+  }
+
+  if (joined) {
+    return (
+      <div className="empty-chat">
+        <p>
+          You were added for on-call coverage{joined.until ? ` until ${new Date(joined.until).toLocaleString()}` : ''}. The conversation opens
+          in a moment.
+        </p>
+      </div>
+    );
+  }
+  if (!patient) {
+    return <div className="empty-chat muted">{patients.loading ? 'Loading…' : 'Conversation not found or you are not a member.'}</div>;
+  }
+  return (
+    <div className="empty-chat">
+      <form className="form" style={{ maxWidth: 480 }} onSubmit={join}>
+        <p>
+          You are not on the care team for <strong>{patientName(patient)}</strong>.
+        </p>
+        <p className="muted small">
+          If you are on call now, you can join this care-team channel for the rest of your shift. Access is recorded in the audit log
+          with your reason, and you are removed when the shift ends.
+        </p>
+        <ErrorBanner error={act.error ?? patients.error} />
+        <Field label="Reason for access">
+          <input value={reason} maxLength={500} onChange={(e) => setReason(e.target.value)} placeholder="e.g. After-hours call from family" required />
+        </Field>
+        <div>
+          <Button type="submit" variant="primary" busy={act.busy}>Join for on-call coverage</Button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 export default function MessagesPage() {
   const { channelId } = useParams();
   const s = useOrgSession();
@@ -670,7 +771,7 @@ export default function MessagesPage() {
         {active ? (
           <ChatView key={active.id} channel={active} />
         ) : channelId && !channels.loading ? (
-          <div className="empty-chat muted">Conversation not found or you are not a member.</div>
+          <NotMemberView channelId={channelId} />
         ) : (
           <div className="empty-chat muted">Select a conversation.</div>
         )}

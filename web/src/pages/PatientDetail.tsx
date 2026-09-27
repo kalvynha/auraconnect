@@ -12,9 +12,12 @@ import { patientName } from '../lib/patient';
 import { Badge, Button, Card, ErrorBanner, Loading, Page, Table, Tabs, Timeline, type TabDef } from '../components/ui';
 import { TaskEditorModal, TaskTable } from '../components/tasks';
 import { LifecycleModal, type LifecycleAction } from './patient/Lifecycle';
+import { ClinicalEditModal } from './patient/ClinicalEditModal';
+import { useIsLicensed } from '../lib/lifecycle';
 import { MilestonesTab } from './patient/MilestonesTab';
 import { VisitsTab } from './patient/VisitsTab';
 import { DocumentsTab } from './patient/DocumentsTab';
+import { CareTeamEditButton } from '../components/careTeam';
 
 const CONSENT_LABELS: Record<keyof Consents, string> = {
   electionStatement: 'Hospice election statement',
@@ -33,6 +36,8 @@ const EVENT_TONES: Record<PatientEventType, string> = {
   recertification: 'accent',
   discharge: 'neutral',
   death: 'neutral',
+  care_team_change: 'info',
+  clinical_update: 'warn',
 };
 
 function DL({ items }: { items: [string, ReactNode][] }) {
@@ -49,6 +54,12 @@ function DL({ items }: { items: [string, ReactNode][] }) {
 }
 
 function OverviewTab({ p }: { p: WithId<Patient> }) {
+  const s = useOrgSession();
+  const licensed = useIsLicensed();
+  const [editing, setEditing] = useState(false);
+  // S2: licensed care-team members or admins may edit the clinical record (the server re-checks).
+  const canEditClinical =
+    licensed && (p.status === 'admitted' || p.status === 'referral') && (s.role === 'admin' || p.careTeamUids.includes(s.user.uid));
   const addr = [p.address.line1, p.address.line2, [p.address.city, p.address.state].filter(Boolean).join(', '), p.address.zip]
     .filter(Boolean)
     .join(' · ');
@@ -113,12 +124,19 @@ function OverviewTab({ p }: { p: WithId<Patient> }) {
           />
         </Card>
       )}
+      {canEditClinical && (
+        <div className="row gap-sm end">
+          <Button small onClick={() => setEditing(true)}>Edit clinical record</Button>
+        </div>
+      )}
+      {editing && <ClinicalEditModal patient={p} onClose={() => setEditing(false)} />}
       <div className="grid-2">
         <Card title="Demographics">
           <DL
             items={[
               ['Date of birth', formatDate(p.dob)],
               ['Sex', p.sex],
+              ['Code status', p.codeStatus],
               ['Phone', p.phone],
               ['Address', addr],
               ['MRN', p.mrn],
@@ -234,7 +252,7 @@ function CareTeamTab({ p }: { p: WithId<Patient> }) {
   const s = useOrgSession();
   return (
     <div className="grid-2">
-      <Card title="Care team">
+      <Card title="Care team" actions={<CareTeamEditButton patient={p} />}>
         {p.careTeamUids.length === 0 ? (
           <p className="muted">No care team assigned.</p>
         ) : (
@@ -286,7 +304,9 @@ export default function PatientDetailPage() {
   const currentBp = currentBenefitPeriodNumber(p.milestones);
   const canAdmit = INTAKE_ROLES.includes(s.role) && p.status === 'referral';
   const clinical = CLINICAL_ROLES.includes(s.role);
-  const canLifecycle = clinical && p.status === 'admitted';
+  const licensed = useIsLicensed();
+  // H4: death, discharge, level of care and recertification are for RN/NP/MD or admins.
+  const canLifecycle = clinical && licensed && p.status === 'admitted';
   const archived = p.status === 'discharged' || p.status === 'deceased';
   const overdueCount = openDeadlines(p).filter((d) => d.overdue).length;
 

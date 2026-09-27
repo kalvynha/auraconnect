@@ -30,7 +30,7 @@ export const DISCIPLINES: readonly Discipline[] = [
 ];
 export const PRIORITIES: readonly Priority[] = ['normal', 'urgent', 'critical'];
 export const ALERT_STATUSES: readonly AlertStatus[] = ['open', 'acked', 'resolved'];
-export const PATIENT_STATUSES: readonly PatientStatus[] = ['referral', 'admitted', 'discharged', 'deceased'];
+export const PATIENT_STATUSES: readonly PatientStatus[] = ['referral', 'admitted', 'discharged', 'deceased', 'non_admit'];
 export const LEVELS_OF_CARE: readonly LevelOfCare[] = ['routine', 'continuous', 'respite', 'gip'];
 export const LEVEL_OF_CARE_LABELS: Record<LevelOfCare, string> = {
   routine: 'Routine home care',
@@ -41,7 +41,7 @@ export const LEVEL_OF_CARE_LABELS: Record<LevelOfCare, string> = {
 export const CODE_STATUSES: readonly CodeStatus[] = ['Full Code', 'DNR', 'DNR/DNI', 'Comfort Care Only', 'Unknown'];
 export const SEXES: readonly Sex[] = ['female', 'male', 'other', 'unknown'];
 export const REFERRAL_STATUSES: readonly ReferralStatus[] = [
-  'uploaded', 'extracting', 'needs_review', 'accepted', 'rejected', 'failed',
+  'uploaded', 'extracting', 'needs_review', 'accepted', 'rejected', 'failed', 'non_admit',
 ];
 
 export const TIMEZONES: readonly string[] = [
@@ -68,6 +68,7 @@ export const ORG_SETTING_DEFAULTS = {
   idgCadenceDays: 15,
   missedVisitGraceMinutes: 120,
   messageLifespanDays: null as number | null,
+  missedVisitAlertMode: 'assignee' as import('@shared/types').MissedVisitAlertMode,
 };
 
 export type OrgSettings = typeof ORG_SETTING_DEFAULTS;
@@ -79,6 +80,7 @@ export function orgSettings(org: Partial<Org> | null | undefined): OrgSettings {
     idgCadenceDays: org?.idgCadenceDays ?? ORG_SETTING_DEFAULTS.idgCadenceDays,
     missedVisitGraceMinutes: org?.missedVisitGraceMinutes ?? ORG_SETTING_DEFAULTS.missedVisitGraceMinutes,
     messageLifespanDays: org?.messageLifespanDays ?? ORG_SETTING_DEFAULTS.messageLifespanDays,
+    missedVisitAlertMode: org?.missedVisitAlertMode ?? ORG_SETTING_DEFAULTS.missedVisitAlertMode,
   };
 }
 
@@ -177,6 +179,7 @@ export const CAPABILITY_LABELS: Record<Capability, string> = {
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'org.create', 'member.invite', 'member.join', 'channel.create', 'channel.members.update',
   'patient.admit', 'patient.update', 'referral.extract', 'referral.accept', 'referral.reject',
+  'referral.create', 'referral.retry', 'referral.claim', 'referral.non_admit', 'invite.revoke',
   'alert.create', 'alert.ack', 'alert.resolve', 'alert.escalate',
   'milestone.complete', 'milestone.reopen', 'patient.level_of_care', 'patient.recertify', 'patient.discharge', 'patient.death',
   'visit.schedule', 'visit.update', 'visit.complete', 'visit.cancel', 'visit.missed',
@@ -185,4 +188,27 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'triage.log', 'triage.assign', 'triage.resolve', 'document.upload',
   'message.recall', 'message.search', 'broadcast.send', 'ai.summarize_channel', 'ai.handoff',
   'volunteer.assign', 'volunteer.log',
+  'bereavement.reassess', 'bereavement.mailing_export', 'bereavement.close',
+  'volunteer.void', 'volunteer.sync', 'volunteer.report', 'volunteer.staff_hours',
+  'visit.reassign', 'visit.plan', 'patient.care_team', 'member.update', 'member.deactivate', 'member.offboard',
+  'org.settings_update', 'report.compliance', 'report.census',
 ];
+
+// v3 intake — mirrors of the constants in @shared/types ("v3 — intake").
+/** Referral file types accepted everywhere (web, iOS, rules, extractor). */
+export const REFERRAL_MIME_TYPES: readonly string[] = [
+  'application/pdf', 'image/png', 'image/jpeg', 'image/webp', 'image/heic', 'image/heif',
+];
+export const REFERRAL_STALE_MINUTES = 6;
+export const REFERRAL_RETRY_COOLDOWN_MINUTES = 2;
+export const REFERRAL_CLAIM_MINUTES = 30;
+export const NON_ADMIT_REASON_LABELS: Record<import('@shared/types').NonAdmitReason, string> = {
+  died_before_admission: 'Died before admission',
+  not_eligible: 'Not eligible (not terminally ill / criteria not met)',
+  declined_hospice: 'Patient or family declined hospice',
+  chose_other_provider: 'Chose another hospice or provider',
+  unable_to_contact: 'Unable to contact',
+  moved_out_of_area: 'Moved out of service area',
+  no_payer: 'No payer / insurance issue',
+  other: 'Other (explain in note)',
+};

@@ -17,7 +17,7 @@ import { useAction, useLiveQuery } from '../lib/hooks';
 import { usePatients } from '../lib/queries';
 import { call } from '../lib/firebase';
 import { CLINICAL_ROLES, TRIAGE_DISPOSITION_LABELS, TRIAGE_URGENCIES, orgSettings } from '../lib/constants';
-import { formatInstant, optStr, tsMillis } from '../lib/format';
+import { formatInstant, optStr, toDateTimeLocal, tsMillis } from '../lib/format';
 import { Badge, Button, Card, ErrorBanner, Field, MemberSelect, Modal, Page, PatientSelect, Table } from '../components/ui';
 
 const URGENCY_RANK: Record<TriageUrgency, number> = { emergent: 0, urgent: 1, routine: 2 };
@@ -132,8 +132,10 @@ function LogCallModal({ roles, onClose }: { roles: WithId<OnCallRole>[]; onClose
             <MemberSelect members={s.members} value={assignedUid} onChange={setAssignedUid} required />
           </Field>
         )}
-        {urgency !== 'routine' && (
+        {urgency !== 'routine' ? (
           <div className="banner banner-warn">An {urgency === 'emergent' ? 'critical' : 'urgent'} escalating alert will be raised to the on-call clinician.</div>
+        ) : (
+          <p className="muted small">The assigned clinician gets a normal alert (no escalation).</p>
         )}
         <div className="row gap end">
           <Button onClick={onClose}>Cancel</Button>
@@ -164,17 +166,25 @@ function AssignModal({ tc, onClose }: { tc: WithId<TriageCall>; onClose: () => v
       }
     >
       <ErrorBanner error={act.error} />
-      <Field label="Assign to">
+      <Field label="Assign to" hint="The new assignee is notified. Only the assigned clinician, an alert recipient or an admin can reassign.">
         <MemberSelect members={s.members} value={uid} onChange={setUid} required />
       </Field>
     </Modal>
   );
 }
 
-function ResolveModal({ tc, onClose }: { tc: WithId<TriageCall>; onClose: () => void }) {
+/**
+ * Resolve a call (also resolves its alert). O3: can schedule a PRN visit, assigned to me by default.
+ * Exported so the Alerts page opens this form for triage alerts.
+ */
+export function ResolveModal({ tc, onClose }: { tc: WithId<TriageCall>; onClose: () => void }) {
   const s = useOrgSession();
   const act = useAction();
   const [disposition, setDisposition] = useState<TriageDisposition | ''>('');
+  const [visit, setVisit] = useState(false);
+  const [visitStart, setVisitStart] = useState(() => toDateTimeLocal(new Date()));
+  const [visitEnd, setVisitEnd] = useState(() => toDateTimeLocal(new Date(Date.now() + 3_600_000)));
+  const [visitAssignee, setVisitAssignee] = useState(s.user.uid);
   const [note, setNote] = useState('');
   const [followUp, setFollowUp] = useState(false);
   const [taskTitle, setTaskTitle] = useState('');
@@ -192,6 +202,13 @@ function ResolveModal({ tc, onClose }: { tc: WithId<TriageCall>; onClose: () => 
       req.followUpTask = { title: taskTitle.trim() };
       if (taskAssignee) req.followUpTask.assigneeUid = taskAssignee;
       if (taskDue) req.followUpTask.dueDate = taskDue;
+    }
+    if (visit) {
+      const start = new Date(visitStart);
+      const end = new Date(visitEnd);
+      if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) return act.setError('The visit must end after it starts.');
+      req.visit = { start: start.toISOString(), end: end.toISOString() };
+      if (visitAssignee && visitAssignee !== s.user.uid) req.visit.assignedUid = visitAssignee;
     }
     if (await act.run(() => call<ResolveTriageCallRequest, unknown>('resolveTriageCall', req))) onClose();
   }
@@ -225,6 +242,24 @@ function ResolveModal({ tc, onClose }: { tc: WithId<TriageCall>; onClose: () => 
             </Field>
             <Field label="Due date">
               <input type="date" value={taskDue} onChange={(e) => setTaskDue(e.target.value)} />
+            </Field>
+          </div>
+        )}
+        {tc.patientId && (
+          <label className="row gap-sm">
+            <input type="checkbox" checked={visit} onChange={(e) => setVisit(e.target.checked)} /> Schedule a PRN visit
+          </label>
+        )}
+        {visit && (
+          <div className="form-grid">
+            <Field label="Start">
+              <input type="datetime-local" required value={visitStart} onChange={(e) => setVisitStart(e.target.value)} />
+            </Field>
+            <Field label="End">
+              <input type="datetime-local" required value={visitEnd} onChange={(e) => setVisitEnd(e.target.value)} />
+            </Field>
+            <Field label="Clinician" hint="A visit that already ended, made by you, is recorded as completed.">
+              <MemberSelect members={s.members} value={visitAssignee} onChange={setVisitAssignee} required />
             </Field>
           </div>
         )}
@@ -311,7 +346,9 @@ export default function TriagePage() {
               header: '',
               className: 'actions',
               cell: (c) =>
-                clinical && (
+                clinical &&
+                // M3: the assignee, alert recipients (checked by the server) or admins; unassigned calls are open to all.
+                (s.isAdmin || !c.assignedUid || c.assignedUid === s.user.uid || !!c.alertId) && (
                   <div className="row gap-sm end">
                     <Button small onClick={() => setAssigning(c)}>Assign</Button>
                     <Button small variant="primary" onClick={() => setResolving(c)}>Resolve</Button>

@@ -9,7 +9,9 @@ import { CAPABILITIES, CAPABILITY_LABELS, DISCIPLINES, ROLES } from '../lib/cons
 import { errorMessage, formatInstant } from '../lib/format';
 import { setMemberTeams } from '../lib/teams';
 import { sendInvitationEmail } from '../lib/invites';
+import { InviteActions, InviteExpiry } from '../components/inviteActions';
 import { Badge, Button, Card, ErrorBanner, Field, Modal, Page, Table } from '../components/ui';
+import { OffboardWizard } from '../components/offboarding';
 
 function TeamsEditor({
   member,
@@ -124,25 +126,6 @@ function CapabilitiesEditor({ member, onClose }: { member: WithId<Member>; onClo
   );
 }
 
-function ResendButton({ email }: { email: string }) {
-  const [state, setState] = useState<'idle' | 'busy' | 'sent' | 'error'>('idle');
-  async function resend() {
-    setState('busy');
-    try {
-      await sendInvitationEmail(email);
-      setState('sent');
-    } catch {
-      setState('error');
-    }
-  }
-  if (state === 'sent') return <span className="muted small">Sent</span>;
-  return (
-    <Button small variant="ghost" busy={state === 'busy'} onClick={() => void resend()}>
-      {state === 'error' ? 'Retry email' : 'Resend email'}
-    </Button>
-  );
-}
-
 function InviteForm({ teams }: { teams: WithId<Team>[] }) {
   const s = useOrgSession();
   const [email, setEmail] = useState('');
@@ -239,6 +222,7 @@ export default function MembersPage() {
   const invites = useLiveQuery<Invite>(query(orgCol(s.orgId, 'invites'), orderBy('createdAt', 'desc')), [s.orgId]);
   const [editing, setEditing] = useState<WithId<Member> | null>(null);
   const [editingCaps, setEditingCaps] = useState<WithId<Member> | null>(null);
+  const [offboarding, setOffboarding] = useState<WithId<Member> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showInactive, setShowInactive] = useState(true);
   const teamName = (id: string) => teams.data.find((t) => t.id === id)?.name ?? '(deleted team)';
@@ -347,6 +331,14 @@ export default function MembersPage() {
                 />
               ),
             },
+            {
+              header: '',
+              className: 'actions',
+              cell: (m) =>
+                m.active && m.id !== s.user.uid && !isLastAdmin(m) ? (
+                  <Button small variant="ghost" onClick={() => setOffboarding(m)}>Offboard…</Button>
+                ) : null,
+            },
           ]}
         />
       </Card>
@@ -367,13 +359,15 @@ export default function MembersPage() {
             { header: 'Discipline', cell: (i) => i.discipline },
             { header: 'Invited by', cell: (i) => s.memberName(i.createdBy) },
             { header: 'Created', cell: (i) => formatInstant(i.createdAt) },
-            { header: '', cell: (i) => <ResendButton email={i.email} /> },
+            { header: 'Expires', cell: (i) => <InviteExpiry invite={i} /> },
+            { header: '', cell: (i) => <InviteActions orgId={s.orgId} invite={i} /> },
           ]}
         />
       </Card>
 
       {editing && <TeamsEditor member={editing} teams={teams.data} onClose={() => setEditing(null)} />}
       {editingCaps && <CapabilitiesEditor member={editingCaps} onClose={() => setEditingCaps(null)} />}
+      {offboarding && <OffboardWizard member={offboarding} onClose={() => setOffboarding(null)} />}
     </Page>
   );
 }

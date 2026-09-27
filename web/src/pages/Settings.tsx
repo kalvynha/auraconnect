@@ -1,14 +1,34 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { orderBy, query, updateDoc } from 'firebase/firestore';
-import type { OnCallRole, Org } from '@shared/types';
+import type { MilestoneKind, OnCallRole, Org } from '@shared/types';
 import { useOrgSession } from '../lib/session';
 import { orgCol, orgDoc } from '../lib/firestore';
 import { useAction, useLiveQuery } from '../lib/hooks';
 import { ORG_SETTING_DEFAULTS, TIMEZONES, orgSettings } from '../lib/constants';
 import { Button, Card, ErrorBanner, Field, Page } from '../components/ui';
+import { DEADLINE_LEAD_DAYS_DEFAULTS } from '../lib/lifecycle';
+import { BereavementSettingsCard } from './Bereavement';
+import { PatientChannelRetentionField } from '../components/PatientChannelRetention';
+import { MissedVisitAlertCard } from '../components/visits';
 
 type SettingsPatch = Partial<Pick<Org, 'triageRoleKey' | 'idgCadenceDays' | 'missedVisitGraceMinutes' | 'messageLifespanDays'>>;
-type OrgPatch = Partial<Pick<Org, 'name' | 'timezone' | 'deadlineLeadDays'>>;
+type OrgPatch = Partial<Pick<Org, 'name' | 'timezone' | 'deadlineLeadDays' | 'deadlineLeadDaysByKind'>>;
+
+/** V1: per-kind reminder lead times shown in settings. HOPE sets all three HOPE kinds. */
+type LeadGroup = 'noe' | 'recert' | 'f2f' | 'hope';
+const LEAD_GROUPS: { key: LeadGroup; label: string; kinds: MilestoneKind[] }[] = [
+  { key: 'noe', label: 'NOE', kinds: ['noe'] },
+  { key: 'recert', label: 'Recertification', kinds: ['recert'] },
+  { key: 'f2f', label: 'Face-to-face', kinds: ['f2f'] },
+  { key: 'hope', label: 'HOPE (admission, HUV1, HUV2)', kinds: ['hope_admission', 'hope_huv1', 'hope_huv2'] },
+];
+
+function leadDraft(org: Partial<Org> | null | undefined): Record<LeadGroup, string> {
+  const by = org?.deadlineLeadDaysByKind ?? {};
+  const out = {} as Record<LeadGroup, string>;
+  for (const g of LEAD_GROUPS) out[g.key] = String(by[g.kinds[0]!] ?? DEADLINE_LEAD_DAYS_DEFAULTS[g.kinds[0]!]);
+  return out;
+}
 
 /**
  * Organization name, time zone and deadline lead time. firestore.rules (orgs/{orgId} update, admin)
@@ -20,13 +40,17 @@ function OrgSettingsCard() {
   const [name, setName] = useState(s.org?.name ?? '');
   const [timezone, setTimezone] = useState(s.org?.timezone ?? '');
   const [leadDays, setLeadDays] = useState(String(s.org?.deadlineLeadDays ?? 7));
+  const [byKind, setByKind] = useState<Record<LeadGroup, string>>(leadDraft(s.org));
   const [saved, setSaved] = useState(false);
+  const byKindJson = JSON.stringify(s.org?.deadlineLeadDaysByKind ?? null);
 
   useEffect(() => {
     setName(s.org?.name ?? '');
     setTimezone(s.org?.timezone ?? '');
     setLeadDays(String(s.org?.deadlineLeadDays ?? 7));
-  }, [s.org?.name, s.org?.timezone, s.org?.deadlineLeadDays]);
+    setByKind(leadDraft(s.org));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [s.org?.name, s.org?.timezone, s.org?.deadlineLeadDays, byKindJson]);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -43,6 +67,13 @@ function OrgSettingsCard() {
       patch.timezone = timezone;
     }
     if (lead !== s.org?.deadlineLeadDays) patch.deadlineLeadDays = lead;
+    const nextByKind: Partial<Record<MilestoneKind, number>> = { ...(s.org?.deadlineLeadDaysByKind ?? {}) };
+    for (const g of LEAD_GROUPS) {
+      const v = Number(byKind[g.key]);
+      if (!Number.isInteger(v) || v < 0 || v > 90) return act.setError(`${g.label} lead time must be a whole number of days from 0 to 90.`);
+      for (const k of g.kinds) nextByKind[k] = v;
+    }
+    if (JSON.stringify(nextByKind) !== JSON.stringify(s.org?.deadlineLeadDaysByKind ?? {})) patch.deadlineLeadDaysByKind = nextByKind;
     if (Object.keys(patch).length === 0) return setSaved(true);
     if (await act.run(() => updateDoc(orgDoc(s.orgId), patch))) setSaved(true);
   }
@@ -63,9 +94,23 @@ function OrgSettingsCard() {
             {tzOptions.map((tz) => <option key={tz} value={tz}>{tz}</option>)}
           </select>
         </Field>
-        <Field label="Deadline reminder lead time (days)" hint="0–90. Reminder alerts are raised this many days before an NOE, recert, F2F or HOPE deadline.">
-          <input type="number" min={0} max={90} step={1} required value={leadDays} onChange={(e) => setLeadDays(e.target.value)} />
-        </Field>
+        <fieldset className="fieldset">
+          <legend>Deadline reminder lead time (days before due)</legend>
+          <p className="muted small">
+            A normal, non-escalating reminder goes to the care team's RNs, NPs and MDs (admins if there are none) this many days before
+            the deadline. Overdue deadlines raise a separate urgent alert that escalates.
+          </p>
+          <div className="form-grid">
+            {LEAD_GROUPS.map((g) => (
+              <Field key={g.key} label={g.label} hint={`0–90. Default ${DEADLINE_LEAD_DAYS_DEFAULTS[g.kinds[0]!]}.`}>
+                <input type="number" min={0} max={90} step={1} required value={byKind[g.key]} onChange={(e) => setByKind({ ...byKind, [g.key]: e.target.value })} />
+              </Field>
+            ))}
+          </div>
+          <Field label="Other deadlines" hint="0–90. Used for any milestone kind without its own lead time.">
+            <input type="number" min={0} max={90} step={1} required value={leadDays} onChange={(e) => setLeadDays(e.target.value)} />
+          </Field>
+        </fieldset>
         <div>
           <Button type="submit" variant="primary" busy={act.busy}>Save organization</Button>
         </div>
@@ -123,6 +168,7 @@ export default function SettingsPage() {
   return (
     <Page title="Settings">
       <OrgSettingsCard />
+      <BereavementSettingsCard />
       <Card title="Care coordination settings">
         <form className="form form-narrow" onSubmit={submit}>
           <ErrorBanner error={act.error ?? roles.error} />
@@ -152,7 +198,9 @@ export default function SettingsPage() {
             <Button type="submit" variant="primary" busy={act.busy}>Save settings</Button>
           </div>
         </form>
+        <PatientChannelRetentionField />
       </Card>
+      <MissedVisitAlertCard />
     </Page>
   );
 }

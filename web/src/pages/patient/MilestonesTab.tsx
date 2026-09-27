@@ -6,16 +6,21 @@ import { useAction } from '../../lib/hooks';
 import { call } from '../../lib/firebase';
 import { CLINICAL_ROLES } from '../../lib/constants';
 import { daysBetween, dueState, formatDate, formatInstant, optStr, toISODate, todayISO, tsToDate } from '../../lib/format';
-import { currentBenefitPeriodNumber, deadlinesOf, milestoneKey, type Deadline } from '../../lib/milestones';
+import { canCompleteMilestoneKind, useIsLicensed } from '../../lib/lifecycle';
+import { currentBenefitPeriodNumber, deadlinesOf, milestoneKey, MILESTONE_LABELS, type Deadline } from '../../lib/milestones';
 import { Badge, Button, Card, ErrorBanner, Field, Modal, Table } from '../../components/ui';
 
 function CompleteModal({ patient, deadline, onClose }: { patient: WithId<Patient>; deadline: Deadline; onClose: () => void }) {
   const s = useOrgSession();
   const act = useAction();
   const [note, setNote] = useState('');
+  const today = todayISO();
+  const [effectiveDate, setEffectiveDate] = useState(today);
   const key = milestoneKey(deadline);
   async function submit() {
-    const req: CompleteMilestoneRequest = { orgId: s.orgId, patientId: patient.id, key };
+    if (!effectiveDate) return act.setError('Enter the date it was filed or completed.');
+    if (effectiveDate > today) return act.setError('The filing date cannot be in the future.');
+    const req: CompleteMilestoneRequest = { orgId: s.orgId, patientId: patient.id, key, effectiveDate };
     const n = optStr(note);
     if (n) req.note = n;
     if (await act.run(() => call<CompleteMilestoneRequest, unknown>('completeMilestone', req))) onClose();
@@ -35,6 +40,10 @@ function CompleteModal({ patient, deadline, onClose }: { patient: WithId<Patient
       <p>
         <strong>{deadline.label}</strong> · due {formatDate(deadline.due)} <span className="mono muted small">{key}</span>
       </p>
+      <Field label="Date filed / completed" hint="The actual filing date. On time is judged from this date, not from when you record it.">
+        <input type="date" required max={today} value={effectiveDate} onChange={(e) => setEffectiveDate(e.target.value)} />
+      </Field>
+      {effectiveDate > deadline.due && <div className="banner banner-warn small">This date is after the due date; it will be recorded as late.</div>}
       <Field label="Note (optional)" hint="e.g. confirmation number, who filed it.">
         <textarea rows={3} value={note} onChange={(e) => setNote(e.target.value)} />
       </Field>
@@ -45,9 +54,10 @@ function CompleteModal({ patient, deadline, onClose }: { patient: WithId<Patient
 function statusOf(p: Patient, d: Deadline): { tone: string; label: string } {
   const c = p.milestoneCompletions?.[milestoneKey(d)];
   if (c) {
-    const done = tsToDate(c.completedAt);
-    // Approximate on-time check in the browser's zone; the server compares in the org time zone.
-    const late = done ? daysBetween(d.due, toISODate(done)) > 0 : false;
+    // S5: on time is judged from the filing date (effectiveDate). Older completions fall back to the
+    // browser-local date of completedAt (the server compares those in the org time zone).
+    const done = c.effectiveDate ?? (tsToDate(c.completedAt) ? toISODate(tsToDate(c.completedAt)!) : null);
+    const late = done ? daysBetween(d.due, done) > 0 : false;
     return { tone: 'ok', label: late ? 'completed (late)' : 'completed' };
   }
   const st = dueState(d.due);
@@ -62,18 +72,22 @@ export function MilestonesTab({ patient }: { patient: WithId<Patient> }) {
   const s = useOrgSession();
   const [completing, setCompleting] = useState<Deadline | null>(null);
   const reopen = useAction();
-  const canEdit = CLINICAL_ROLES.includes(s.role);
+  const clinical = CLINICAL_ROLES.includes(s.role);
+  const licensed = useIsLicensed();
   const m = patient.milestones;
   if (!m) return <Card><p className="muted">Milestones are computed at admission.</p></Card>;
   const rows = deadlinesOf(m);
   const currentBp = currentBenefitPeriodNumber(m);
 
   async function doReopen(d: Deadline) {
-    if (!window.confirm(`Reopen "${d.label}"? Deadline reminders will resume for it.`)) return;
-    await reopen.run(() =>
-      call<ReopenMilestoneRequest, unknown>('reopenMilestone', { orgId: s.orgId, patientId: patient.id, key: milestoneKey(d) }),
-    );
+    const reason = window.prompt(`Reopen "${d.label}"? The completion is kept in the milestone history.\n\nReason (optional):`, '');
+    if (reason === null) return;
+    const req: ReopenMilestoneRequest = { orgId: s.orgId, patientId: patient.id, key: milestoneKey(d) };
+    const r = optStr(reason);
+    if (r) req.reason = r;
+    await reopen.run(() => call<ReopenMilestoneRequest, unknown>('reopenMilestone', req));
   }
+  const history = [...(patient.milestoneHistory ?? [])].reverse();
 
   return (
     <>
@@ -109,7 +123,9 @@ export function MilestonesTab({ patient }: { patient: WithId<Patient> }) {
               csv: (d) => {
                 const c = patient.milestoneCompletions?.[milestoneKey(d)];
                 const st = statusOf(patient, d).label;
-                return c ? `${st} — ${s.memberName(c.completedBy)} ${formatInstant(c.completedAt)}${c.note ? ` — ${c.note}` : ''}` : st;
+                return c
+                  ? `${st} — filed ${c.effectiveDate ?? ''} — ${s.memberName(c.completedBy)} ${formatInstant(c.completedAt)}${c.note ? ` — ${c.note}` : ''}`
+                  : st;
               },
               cell: (d) => {
                 const st = statusOf(patient, d);
@@ -119,7 +135,8 @@ export function MilestonesTab({ patient }: { patient: WithId<Patient> }) {
                     <Badge tone={st.tone}>{st.label}</Badge>
                     {c && (
                       <div className="muted small">
-                        {s.memberName(c.completedBy)} · {formatInstant(c.completedAt)}
+                        {c.effectiveDate && <>Filed {formatDate(c.effectiveDate)} · </>}
+                        recorded by {s.memberName(c.completedBy)} · {formatInstant(c.completedAt)}
                         {c.note && <div>“{c.note}”</div>}
                       </div>
                     )}
@@ -131,11 +148,11 @@ export function MilestonesTab({ patient }: { patient: WithId<Patient> }) {
               header: '',
               className: 'actions',
               cell: (d) =>
-                !canEdit ? null : patient.milestoneCompletions?.[milestoneKey(d)] ? (
-                  <Button small variant="ghost" busy={reopen.busy} onClick={() => void doReopen(d)}>Reopen</Button>
-                ) : (
+                !clinical ? null : patient.milestoneCompletions?.[milestoneKey(d)] ? (
+                  licensed ? <Button small variant="ghost" busy={reopen.busy} onClick={() => void doReopen(d)}>Reopen</Button> : null
+                ) : canCompleteMilestoneKind(licensed, s.role, d.kind) ? (
                   <Button small variant="primary" onClick={() => setCompleting(d)}>Mark filed/completed</Button>
-                ),
+                ) : null,
             },
           ]}
         />
@@ -163,6 +180,51 @@ export function MilestonesTab({ patient }: { patient: WithId<Patient> }) {
           ]}
         />
       </Card>
+      {history.length > 0 && (
+        <Card title="Milestone history">
+          <Table
+            rows={history}
+            rowKey={(h) => `${h.key}-${formatInstant(h.reopenedAt)}`}
+            exportName="milestone-history"
+            columns={[
+              {
+                header: 'Milestone',
+                csv: (h) => h.key,
+                cell: (h) => {
+                  const kind = h.key.split(':')[0] as keyof typeof MILESTONE_LABELS;
+                  return (
+                    <>
+                      <strong>{MILESTONE_LABELS[kind] ?? kind}</strong>
+                      <div className="mono muted small">{h.key}</div>
+                    </>
+                  );
+                },
+              },
+              {
+                header: 'Was completed',
+                csv: (h) => `${h.effectiveDate ?? ''} ${s.memberName(h.completedBy)} ${formatInstant(h.completedAt)}`,
+                cell: (h) => (
+                  <span className="small">
+                    {h.effectiveDate && <>Filed {formatDate(h.effectiveDate)} · </>}
+                    {s.memberName(h.completedBy)} · {formatInstant(h.completedAt)}
+                    {h.note && <div className="muted">“{h.note}”</div>}
+                  </span>
+                ),
+              },
+              {
+                header: 'Reopened',
+                csv: (h) => `${s.memberName(h.reopenedBy)} ${formatInstant(h.reopenedAt)}${h.reopenReason ? ` — ${h.reopenReason}` : ''}`,
+                cell: (h) => (
+                  <span className="small">
+                    {s.memberName(h.reopenedBy)} · {formatInstant(h.reopenedAt)}
+                    {h.reopenReason && <div className="muted">“{h.reopenReason}”</div>}
+                  </span>
+                ),
+              },
+            ]}
+          />
+        </Card>
+      )}
       {completing && <CompleteModal patient={patient} deadline={completing} onClose={() => setCompleting(null)} />}
     </>
   );
