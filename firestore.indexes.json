@@ -501,6 +501,20 @@
           "order": "DESCENDING"
         }
       ]
+    },
+    {
+      "collectionGroup": "visits",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "patientId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "scheduledStart",
+          "order": "DESCENDING"
+        }
+      ]
     }
   ],
   "fieldOverrides": [

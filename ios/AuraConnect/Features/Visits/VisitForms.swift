@@ -38,12 +38,12 @@ struct VisitRow: View {
 
 /// Defaults for new visits (a plain enum so it can be used in property initializers).
 enum VisitDefaults {
-    /// The top of the next hour.
+    /// Now, rounded down to the quarter hour (most field visits are PRN / same-day).
     static func start(now: Date = Date()) -> Date {
         let calendar = Calendar.current
-        let nextHour = calendar.date(byAdding: .hour, value: 1, to: now) ?? now
-        let components = calendar.dateComponents([.year, .month, .day, .hour], from: nextHour)
-        return calendar.date(from: components) ?? nextHour
+        var components = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: now)
+        components.minute = ((components.minute ?? 0) / 15) * 15
+        return calendar.date(from: components) ?? now
     }
 }
 
@@ -140,7 +140,8 @@ struct VisitEditorView: View {
             }
         } else {
             discipline = org.me?.discipline ?? .rn
-            assignedUid = careTeamUids.contains(org.uid) ? org.uid : nil
+            // Default to me: the person scheduling in the field is usually the one visiting.
+            assignedUid = org.uid
         }
     }
 
@@ -164,9 +165,99 @@ struct VisitEditorView: View {
     }
 }
 
+// MARK: - Visit context
+
+/// What a clinician needs at the door: address (tap to navigate), code status, allergies,
+/// caregiver (tap to call) and the last completed visit note. Loads the patient once.
+/// Meant to sit inside a `List` or `Form`.
+struct VisitContextSection: View {
+    @Environment(OrgStore.self) private var org
+    let patientId: String
+    /// The visit being viewed, so its own note is not shown as "last visit".
+    var excludingVisitId: String? = nil
+
+    @State private var patient: Patient?
+    @State private var lastVisit: Visit?
+    @State private var isLoading = true
+    @State private var failed = false
+
+    var body: some View {
+        Section {
+            if let patient {
+                content(patient.input)
+            } else if isLoading {
+                HStack {
+                    ProgressView()
+                    Text("Loading patient…").foregroundStyle(.secondary)
+                }
+            } else if failed {
+                Text("Patient details are unavailable.").foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("Patient context")
+        }
+        .task(id: patientId) { await load() }
+    }
+
+    @ViewBuilder
+    private func content(_ input: PatientInput) -> some View {
+        InfoRow(label: "Address", value: input.address.formatted, url: input.address.mapsURL)
+        InfoRow(label: "Patient phone", value: input.phone, url: ContactLinks.phone(input.phone))
+        LabeledContent("Code status") {
+            Text(input.codeStatus.label)
+                .fontWeight(.semibold)
+                .foregroundStyle(input.codeStatus == .fullCode || input.codeStatus == .unknown ? Color.primary : Color.purple)
+        }
+        LabeledContent("Allergies") {
+            let allergies = input.allergies.compactMap { $0.nilIfBlank }
+            if allergies.isEmpty {
+                Text("None recorded").foregroundStyle(.secondary)
+            } else {
+                Text(allergies.joined(separator: ", "))
+                    .foregroundStyle(.red)
+                    .multilineTextAlignment(.trailing)
+            }
+        }
+        if let caregiver = input.caregiver, !caregiver.isEmpty {
+            let relation = caregiver.relationship?.nilIfBlank.map { " (\($0))" } ?? ""
+            InfoRow(label: "Caregiver", value: caregiver.name.nilIfBlank.map { $0 + relation } ?? caregiver.relationship)
+            InfoRow(label: "Caregiver phone", value: caregiver.phone, url: ContactLinks.phone(caregiver.phone))
+        }
+        if let lastVisit, let note = lastVisit.note?.nilIfBlank {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Last visit · \(lastVisit.discipline?.label ?? "Visit") · \(RelativeTime.short(lastVisit.completedAt ?? lastVisit.scheduledStart))")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text(note)
+                    .font(.subheadline)
+                    .lineLimit(6)
+            }
+            .padding(.vertical, 2)
+        }
+    }
+
+    private func load() async {
+        isLoading = true
+        do {
+            patient = try await PatientRepository(orgId: org.orgId).fetchPatient(id: patientId)
+            failed = patient == nil
+        } catch {
+            failed = true
+        }
+        isLoading = false
+        // Optional extra: one small read; skipped silently if it fails (e.g. offline, missing index).
+        if let recent = try? await VisitRepository(orgId: org.orgId).fetchRecentVisits(patientId: patientId) {
+            lastVisit = recent.first { visit in
+                visit.visitStatus == .completed && visit.id != excludingVisitId && visit.note?.nilIfBlank != nil
+            }
+        }
+    }
+}
+
 // MARK: - Complete / cancel
 
-/// Marks a visit completed (`completeVisit`) with an optional note.
+/// Marks a visit completed (`completeVisit`) with an optional note. Missed visits can be
+/// completed too (late documentation); the server clears the missed-visit alert.
 struct CompleteVisitView: View {
     @Environment(OrgStore.self) private var org
     @Environment(\.dismiss) private var dismiss
@@ -185,13 +276,20 @@ struct CompleteVisitView: View {
                 Section {
                     LabeledContent("Patient", value: visit.displayPatientName)
                     LabeledContent("Scheduled", value: visit.timeRange)
+                } footer: {
+                    if visit.visitStatus == .missed {
+                        Text("This visit was marked missed. Completing it records late documentation.")
+                    }
                 }
                 Section("Visit note") {
                     TextField("Optional note", text: $note, axis: .vertical)
                         .lineLimit(3...8)
                 }
+                if let patientId = visit.patientId?.nilIfBlank {
+                    VisitContextSection(patientId: patientId, excludingVisitId: visit.id)
+                }
             }
-            .navigationTitle("Complete visit")
+            .navigationTitle(visit.visitStatus == .missed ? "Document missed visit" : "Complete visit")
             .navigationBarTitleDisplayMode(.inline)
             .interactiveDismissDisabled(isSubmitting)
             .toolbar {

@@ -7,9 +7,22 @@ final class MyVisitsViewModel {
     enum Span: String, CaseIterable, Identifiable {
         case today = "Today"
         case week = "Next 7 days"
+        case missed = "Missed"
         var id: String { rawValue }
 
-        var days: Int { self == .today ? 1 : 7 }
+        /// `[start, end)` for the `assignedUid` + `scheduledStart` query.
+        func bounds(now: Date, calendar: Calendar = .current) -> (start: Date, end: Date) {
+            let today = calendar.startOfDay(for: now)
+            switch self {
+            case .today:
+                return (today, calendar.date(byAdding: .day, value: 1, to: today) ?? today.addingTimeInterval(86_400))
+            case .week:
+                return (today, calendar.date(byAdding: .day, value: 7, to: today) ?? today.addingTimeInterval(7 * 86_400))
+            case .missed:
+                // Missed visits from the last 7 days that still need (late) documentation.
+                return (calendar.date(byAdding: .day, value: -7, to: today) ?? today.addingTimeInterval(-7 * 86_400), now)
+            }
+        }
     }
 
     let orgId: String
@@ -26,15 +39,15 @@ final class MyVisitsViewModel {
         self.uid = uid
     }
 
-    /// Streams visits for the selected range that are assigned to me. Restart when `range` changes.
+    /// Streams visits for the selected range that are assigned to me (server-side `assignedUid`
+    /// filter). Restart when `range` changes.
     func run() async {
         isLoading = true
-        let calendar = Calendar.current
-        let start = calendar.startOfDay(for: Date())
-        let end = calendar.date(byAdding: .day, value: range.days, to: start) ?? start.addingTimeInterval(86_400)
+        let span = range
+        let bounds = span.bounds(now: Date())
         do {
-            for try await list in VisitRepository(orgId: orgId).visits(from: start, to: end) {
-                visits = list.filter { $0.assignedUid == uid }
+            for try await list in VisitRepository(orgId: orgId).visits(assignedTo: uid, from: bounds.start, to: bounds.end) {
+                visits = span == .missed ? list.filter { $0.visitStatus == .missed } : list
                 isLoading = false
             }
         } catch {
@@ -69,7 +82,8 @@ struct VisitDay: Identifiable {
     }
 }
 
-/// "My Visits": visits assigned to me today or this week, with complete / cancel.
+/// "My Visits": visits assigned to me today, this week, or missed in the last week, with
+/// complete (including late documentation of missed visits) / cancel.
 struct MyVisitsView: View {
     @Environment(OrgStore.self) private var org
 
@@ -87,6 +101,21 @@ private struct MyVisitsContent: View {
     }
 
     private var canAct: Bool { org.role.canManageCare }
+
+    /// Scheduled or missed (late documentation) visits I may complete: clinical roles, or my own visit.
+    private func canComplete(_ visit: Visit) -> Bool {
+        let status = visit.visitStatus
+        guard status == .scheduled || status == .missed else { return false }
+        return canAct || visit.assignedUid == org.uid
+    }
+
+    private var emptyDescription: String {
+        switch model.range {
+        case .today: return "You have no visits scheduled today."
+        case .week: return "You have no visits in the next 7 days."
+        case .missed: return "You have no missed visits in the last 7 days."
+        }
+    }
 
     var body: some View {
         @Bindable var model = model
@@ -117,11 +146,9 @@ private struct MyVisitsContent: View {
             if model.isLoading && model.visits.isEmpty {
                 ProgressView()
             } else if model.visits.isEmpty {
-                ContentUnavailableView("No visits",
+                ContentUnavailableView(model.range == .missed ? "No missed visits" : "No visits",
                                        systemImage: "calendar.badge.clock",
-                                       description: Text(model.range == .today
-                                                         ? "You have no visits scheduled today."
-                                                         : "You have no visits in the next 7 days."))
+                                       description: Text(emptyDescription))
             }
         }
         .navigationTitle("My Visits")
@@ -138,9 +165,14 @@ private struct MyVisitsContent: View {
 
     @ViewBuilder
     private func row(_ visit: Visit) -> some View {
-        let actionable = canAct && visit.visitStatus == .scheduled
+        let completable = canComplete(visit)
+        let cancellable = canAct && visit.visitStatus == .scheduled
         Group {
-            if let patientId = visit.patientId?.nilIfBlank {
+            if let visitId = visit.id {
+                NavigationLink(value: Route.visit(visitId)) {
+                    VisitRow(visit: visit, showPatient: true)
+                }
+            } else if let patientId = visit.patientId?.nilIfBlank {
                 NavigationLink(value: Route.patient(patientId)) {
                     VisitRow(visit: visit, showPatient: true)
                 }
@@ -149,17 +181,17 @@ private struct MyVisitsContent: View {
             }
         }
         .swipeActions(edge: .leading) {
-            if actionable {
+            if completable {
                 Button {
                     model.completing = visit
                 } label: {
-                    Label("Complete", systemImage: "checkmark")
+                    Label(visit.visitStatus == .missed ? "Document" : "Complete", systemImage: "checkmark")
                 }
                 .tint(.green)
             }
         }
         .swipeActions(edge: .trailing) {
-            if actionable {
+            if cancellable {
                 Button {
                     model.cancelling = visit
                 } label: {
@@ -169,12 +201,15 @@ private struct MyVisitsContent: View {
             }
         }
         .contextMenu {
-            if actionable {
+            if completable {
                 Button {
                     model.completing = visit
                 } label: {
-                    Label("Complete visit", systemImage: "checkmark.circle")
+                    Label(visit.visitStatus == .missed ? "Document missed visit" : "Complete visit",
+                          systemImage: "checkmark.circle")
                 }
+            }
+            if cancellable {
                 Button(role: .destructive) {
                     model.cancelling = visit
                 } label: {

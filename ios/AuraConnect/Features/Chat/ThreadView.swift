@@ -97,7 +97,14 @@ final class ThreadViewModel {
             body: body,
             priority: .normal,
             attachments: [],
-            threadParentId: parentId
+            threadParentId: parentId,
+            onError: { [weak self] error in
+                // The server rejected the reply (Firestore rolled back the local copy): put the
+                // text back in the composer so it can be retried with Send.
+                guard let self else { return }
+                if self.draft.trimmed.isEmpty { self.draft = body }
+                self.errorMessage = "Reply not sent: \(error.userMessage). Tap Send to retry."
+            }
         )
         draft = ""
     }
@@ -246,7 +253,7 @@ private struct ThreadContent: View {
         .contextMenu {
             if !message.isRecalled && !message.text.isEmpty {
                 Button {
-                    UIPasteboard.general.string = message.text
+                    SecurePasteboard.copy(message.text)
                 } label: {
                     Label("Copy", systemImage: "doc.on.doc")
                 }

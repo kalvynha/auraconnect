@@ -1,5 +1,7 @@
 import SwiftUI
 import Observation
+import UIKit
+import UniformTypeIdentifiers
 
 /// Runs an AI text callable (`summarizeChannel`, `generateHandoff`) for a look-back window.
 /// Results are never stored; they live only in this model.
@@ -33,11 +35,15 @@ final class AiTextRequestModel {
     }
 }
 
-/// Hours picker, Generate button, the AI text with its disclaimer, and copy / share actions.
+/// Hours picker, Generate button, the AI text with its disclaimer, and a copy action.
 /// Meant to sit inside a `List`/`Form`.
+///
+/// AI text summarizes PHI, so it stays in the app: there is no share sheet, text selection is
+/// off, and Copy puts it on the pasteboard as local-only (no Universal Clipboard) for 5 minutes.
 struct AiTextSections: View {
     @Bindable var model: AiTextRequestModel
     let generateTitle: String
+    /// Kept for source compatibility with callers; sharing is intentionally not offered.
     let shareSubject: String
     @State private var didCopy = false
 
@@ -71,7 +77,6 @@ struct AiTextSections: View {
                     .foregroundStyle(.orange)
                 Text(result.text.nilIfBlank ?? "Nothing to report for this period.")
                     .font(.body)
-                    .textSelection(.enabled)
                     .padding(.vertical, 4)
             } header: {
                 Text("Result")
@@ -83,18 +88,25 @@ struct AiTextSections: View {
 
             Section {
                 Button {
-                    UIPasteboard.general.string = result.text
+                    Self.copyLocally(result.text)
                     didCopy = true
                 } label: {
                     Label(didCopy ? "Copied" : "Copy", systemImage: didCopy ? "checkmark" : "doc.on.doc")
                 }
-                ShareLink(item: result.text, subject: Text(shareSubject)) {
-                    Label("Share", systemImage: "square.and.arrow.up")
-                }
+            } footer: {
+                Text("Copied text stays on this device and is cleared from the clipboard after 5 minutes.")
             }
             .onChange(of: result.text) { _, _ in
                 didCopy = false
             }
         }
+    }
+
+    /// Local-only (no Handoff / Universal Clipboard), expiring pasteboard copy.
+    static func copyLocally(_ text: String) {
+        UIPasteboard.general.setItems(
+            [[UTType.plainText.identifier: text]],
+            options: [.localOnly: true, .expirationDate: Date().addingTimeInterval(300)]
+        )
     }
 }

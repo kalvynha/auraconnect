@@ -79,7 +79,7 @@ private struct ScheduleContent: View {
         TimelineView(.periodic(from: .now, by: 60)) { context in
             list(now: context.date)
         }
-        .navigationTitle("Schedule")
+        .navigationTitle("On-call schedule")
         .task { await model.runRoles() }
         .task { await model.runShifts() }
     }

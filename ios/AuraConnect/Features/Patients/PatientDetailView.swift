@@ -307,15 +307,15 @@ private struct PatientDetailContent: View {
             Section("Caregiver") {
                 InfoRow(label: "Name", value: caregiver.name)
                 InfoRow(label: "Relationship", value: caregiver.relationship)
-                InfoRow(label: "Phone", value: caregiver.phone)
+                InfoRow(label: "Phone", value: caregiver.phone, url: ContactLinks.phone(caregiver.phone))
             }
         }
 
         Section("Demographics") {
             InfoRow(label: "Date of birth", value: input.dob.map { ISODate.display($0) })
             InfoRow(label: "Sex", value: input.sex == .unknown ? nil : input.sex.label)
-            InfoRow(label: "Phone", value: input.phone)
-            InfoRow(label: "Address", value: input.address.formatted)
+            InfoRow(label: "Phone", value: input.phone, url: ContactLinks.phone(input.phone))
+            InfoRow(label: "Address", value: input.address.formatted, url: input.address.mapsURL)
             InfoRow(label: "MRN", value: input.mrn)
             InfoRow(label: "Medicare MBI", value: input.medicareMbi)
             InfoRow(label: "Payer", value: input.insurance.payer)
@@ -402,11 +402,23 @@ private struct PhysicianRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("\(role): \(physician.name)")
-            let detail = [physician.npi.map { "NPI \($0)" }, physician.phone.map { "Ph \($0)" }, physician.fax.map { "Fax \($0)" }]
+            let detail = [physician.npi?.nilIfBlank.map { "NPI \($0)" }, physician.fax?.nilIfBlank.map { "Fax \($0)" }]
                 .compactMap { $0 }
                 .joined(separator: " · ")
             if !detail.isEmpty {
                 Text(detail).font(.caption).foregroundStyle(.secondary)
+            }
+            if let phone = physician.phone?.nilIfBlank {
+                if let url = ContactLinks.phone(phone) {
+                    Link(destination: url) {
+                        Label(phone, systemImage: "phone.fill")
+                            .font(.subheadline)
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Call \(role.lowercased()) physician, \(phone)")
+                } else {
+                    Text("Ph \(phone)").font(.caption).foregroundStyle(.secondary)
+                }
             }
         }
     }

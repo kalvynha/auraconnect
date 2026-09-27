@@ -106,6 +106,17 @@ struct RecertifyView: View {
         return true
     }
 
+    /// The F2F must fall within the 30 days before the period start, up to the period start.
+    /// Returns a warning when the chosen date is outside that window (the server has the final say).
+    private func f2fWindowWarning(for period: BenefitPeriod) -> String? {
+        guard let periodStart = ISODate.parse(period.start) else { return nil }
+        let calendar = Calendar.current
+        guard let windowStart = calendar.date(byAdding: .day, value: -30, to: periodStart) else { return nil }
+        let chosen = calendar.startOfDay(for: f2fDate)
+        guard chosen < windowStart || chosen > periodStart else { return nil }
+        return "The F2F date is outside the window (\(ISODate.display(ISODate.string(from: windowStart))) – \(ISODate.display(period.start))). It must be within 30 days before the period starts."
+    }
+
     var body: some View {
         NavigationStack {
             Form {
@@ -134,6 +145,11 @@ struct RecertifyView: View {
                     if let period = selectedPeriod, period.f2fRequired {
                         Section {
                             DatePicker("F2F date", selection: $f2fDate, displayedComponents: .date)
+                            if let warning = f2fWindowWarning(for: period) {
+                                Label(warning, systemImage: "exclamationmark.triangle.fill")
+                                    .font(.footnote)
+                                    .foregroundStyle(.red)
+                            }
                             TextField("F2F performed by", text: $f2fBy)
                                 .textInputAutocapitalization(.words)
                         } header: {
@@ -281,6 +297,17 @@ struct DischargePatientView: View {
 
 // MARK: - Death
 
+/// Where the death occurred; "Other" takes free text.
+enum DeathLocation: String, CaseIterable, Identifiable {
+    case home = "Home"
+    case facility = "Facility"
+    case hospital = "Hospital"
+    case inpatientUnit = "Inpatient unit"
+    case other = "Other"
+
+    var id: String { rawValue }
+}
+
 struct RecordDeathView: View {
     @Environment(OrgStore.self) private var org
     @Environment(\.dismiss) private var dismiss
@@ -290,10 +317,13 @@ struct RecordDeathView: View {
     @State private var includeTime = true
     @State private var time = Date()
     @State private var pronouncedBy = ""
-    @State private var location = ""
+    @State private var location: DeathLocation = .home
+    @State private var otherLocation = ""
     @State private var notes = ""
-    @State private var risk: BereavementRisk = .low
+    /// No default: the clinician must assess and choose.
+    @State private var risk: BereavementRisk?
     @State private var bereavementAssigneeUid: String?
+    @State private var didLoad = false
     @State private var confirming = false
     @State private var isSubmitting = false
     @State private var errorMessage: String?
@@ -302,6 +332,26 @@ struct RecordDeathView: View {
     private var timeString: String {
         let components = Calendar.current.dateComponents([.hour, .minute], from: time)
         return String(format: "%02d:%02d", components.hour ?? 0, components.minute ?? 0)
+    }
+
+    private var locationText: String? {
+        location == .other ? otherLocation.nilIfBlank : location.rawValue
+    }
+
+    private var isValid: Bool {
+        patient.id != nil && risk != nil && locationText != nil
+    }
+
+    /// Social workers, chaplains and members with the `bereavement` capability (plus the
+    /// current selection, so an existing choice never disappears).
+    private var coordinatorOptions: [Member] {
+        let selected = bereavementAssigneeUid
+        let disciplines: Set<Discipline> = [.sw, .chaplain]
+        return org.activeMembers.filter { member in
+            if let discipline = member.discipline, disciplines.contains(discipline) { return true }
+            if (member.capabilities ?? []).contains("bereavement") { return true }
+            return member.memberUid == selected
+        }
     }
 
     var body: some View {
@@ -318,7 +368,15 @@ struct RecordDeathView: View {
                     }
                     TextField("Pronounced by", text: $pronouncedBy)
                         .textInputAutocapitalization(.words)
-                    TextField("Location", text: $location)
+                    Picker("Location", selection: $location) {
+                        ForEach(DeathLocation.allCases) { location in
+                            Text(location.rawValue).tag(location)
+                        }
+                    }
+                    if location == .other {
+                        TextField("Describe the location", text: $otherLocation)
+                            .textInputAutocapitalization(.sentences)
+                    }
                 }
                 Section("Notes") {
                     TextField("Optional notes", text: $notes, axis: .vertical)
@@ -326,16 +384,22 @@ struct RecordDeathView: View {
                 }
                 Section {
                     Picker("Bereavement risk", selection: $risk) {
+                        Text("Choose…").tag(BereavementRisk?.none)
                         ForEach(BereavementRisk.allCases) { risk in
-                            Text(risk.label).tag(risk)
+                            Text(risk.label).tag(BereavementRisk?.some(risk))
                         }
                     }
+                    if risk == nil {
+                        Text("Assess and choose a bereavement risk level.")
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                    }
                     CareMemberPicker(title: "Bereavement coordinator", selection: $bereavementAssigneeUid,
-                                     members: org.activeMembers)
+                                     members: coordinatorOptions, noneLabel: "Unassigned (org default)")
                 } header: {
                     Text("Bereavement")
                 } footer: {
-                    Text("Creates a 13-month bereavement plan for the family. The care team channel is archived and future visits and open tasks are cancelled.")
+                    Text("Creates a 13-month bereavement plan for the family. Coordinators are social workers, chaplains and members with bereavement access. The care team channel is archived and future visits and open tasks are cancelled.")
                 }
             }
             .navigationTitle("Record death")
@@ -346,10 +410,15 @@ struct RecordDeathView: View {
                     Button("Cancel") { dismiss() }.disabled(isSubmitting)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    CareSubmitButton(title: "Record", isWorking: isSubmitting, isEnabled: patient.id != nil) {
+                    CareSubmitButton(title: "Record", isWorking: isSubmitting, isEnabled: isValid) {
                         confirming = true
                     }
                 }
+            }
+            .onAppear {
+                guard !didLoad else { return }
+                didLoad = true
+                pronouncedBy = org.me?.displayName?.nilIfBlank ?? org.myName
             }
             .confirmationDialog("Record the death of \(patient.sortName)?", isPresented: $confirming, titleVisibility: .visible) {
                 Button("Record death", role: .destructive) {
@@ -361,7 +430,7 @@ struct RecordDeathView: View {
     }
 
     private func submit() async {
-        guard !isSubmitting, let patientId = patient.id else { return }
+        guard !isSubmitting, let patientId = patient.id, let risk else { return }
         isSubmitting = true
         errorMessage = nil
         defer { isSubmitting = false }
@@ -372,7 +441,7 @@ struct RecordDeathView: View {
                 date: ISODate.string(from: date),
                 time: includeTime ? timeString : nil,
                 pronouncedBy: pronouncedBy,
-                location: location,
+                location: locationText,
                 notes: notes,
                 bereavementRisk: risk,
                 bereavementAssigneeUid: bereavementAssigneeUid

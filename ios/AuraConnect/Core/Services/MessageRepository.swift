@@ -2,6 +2,14 @@ import Foundation
 import FirebaseFirestore
 import FirebaseStorage
 
+/// One snapshot of a channel's messages plus which of them are still local-only
+/// (`hasPendingWrites`, e.g. sent while offline).
+struct MessageSnapshot {
+    /// Newest first.
+    var messages: [Message]
+    var pendingIds: Set<String>
+}
+
 struct MessageRepository {
     let orgId: String
 
@@ -16,6 +24,42 @@ struct MessageRepository {
             .order(by: "createdAt", descending: true)
             .limit(to: limit)
             .decodedStream(Message.self, serverTimestamps: .estimate)
+    }
+
+    /// Like `recentMessages`, but also reports which messages have not reached the server yet.
+    /// Listens with metadata changes so a message flips from pending to sent when it syncs.
+    func recentMessagesWithPending(channelId: String, limit: Int = 200) -> AsyncThrowingStream<MessageSnapshot, Error> {
+        let query = messages(channelId)
+            .order(by: "createdAt", descending: true)
+            .limit(to: limit)
+        return AsyncThrowingStream { continuation in
+            let registration = query.addSnapshotListener(includeMetadataChanges: true) { snapshot, error in
+                if let error {
+                    continuation.finish(throwing: error)
+                    return
+                }
+                guard let snapshot else { return }
+                var items: [Message] = []
+                var pending: Set<String> = []
+                items.reserveCapacity(snapshot.documents.count)
+                for document in snapshot.documents {
+                    do {
+                        items.append(try document.data(as: Message.self, with: .estimate))
+                        if document.metadata.hasPendingWrites {
+                            pending.insert(document.documentID)
+                        }
+                    } catch {
+                        #if DEBUG
+                        print("[Firestore] Skipping \(document.reference.path): \(error)")
+                        #endif
+                    }
+                }
+                continuation.yield(MessageSnapshot(messages: items, pendingIds: pending))
+            }
+            continuation.onTermination = { _ in
+                registration.remove()
+            }
+        }
     }
 
     /// A single message (e.g. a thread's parent), with pending timestamps estimated.
@@ -34,6 +78,8 @@ struct MessageRepository {
     /// Writes a message directly (works offline; appears instantly via latency compensation).
     /// Shape must match firestore.rules exactly: 8 keys, explicit nulls, server timestamp,
     /// plus `threadParentId` for thread replies only.
+    /// `onError` runs on the main actor if the server rejects the write (the local copy is
+    /// then rolled back by Firestore, so callers should keep the content for a retry).
     @discardableResult
     func send(
         channelId: String,
@@ -42,7 +88,8 @@ struct MessageRepository {
         body: String,
         priority: Priority,
         attachments: [Attachment],
-        threadParentId: String? = nil
+        threadParentId: String? = nil,
+        onError: (@MainActor (Error) -> Void)? = nil
     ) -> String {
         let ref = messages(channelId).document()
         var data: [String: Any] = [
@@ -59,7 +106,12 @@ struct MessageRepository {
             data["threadParentId"] = threadParentId
         }
         ref.setData(data) { error in
-            if let error { print("[Chat] send failed: \(error.localizedDescription)") }
+            guard let error else { return }
+            if let onError {
+                Task { @MainActor in onError(error) }
+            } else {
+                print("[Chat] send failed: \(error.localizedDescription)")
+            }
         }
         return ref.documentID
     }

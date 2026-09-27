@@ -141,17 +141,40 @@ struct ErrorBanner: View {
     }
 }
 
-/// Label/value row that hides itself when the value is blank.
+/// Label/value row that hides itself when the value is blank. With a `url` (e.g. from
+/// `ContactLinks.phone(_:)` or `ContactLinks.maps(_:)`) the value becomes a tappable link.
 struct InfoRow: View {
     let label: String
     let value: String?
+    var url: URL? = nil
+
+    private var linkSymbol: String {
+        switch url?.scheme?.lowercased() {
+        case "tel": return "phone.fill"
+        case "maps", "http", "https": return "map.fill"
+        default: return "arrow.up.right.square"
+        }
+    }
 
     var body: some View {
         if let value = value?.nilIfBlank {
             LabeledContent(label) {
-                Text(value)
-                    .multilineTextAlignment(.trailing)
-                    .textSelection(.enabled)
+                if let url {
+                    Link(destination: url) {
+                        HStack(spacing: 6) {
+                            Text(value)
+                                .multilineTextAlignment(.trailing)
+                            Image(systemName: linkSymbol)
+                                .font(.footnote)
+                                .accessibilityHidden(true)
+                        }
+                    }
+                    .accessibilityHint(url.scheme == "tel" ? "Calls this number" : "Opens in Maps")
+                } else {
+                    Text(value)
+                        .multilineTextAlignment(.trailing)
+                        .textSelection(.enabled)
+                }
             }
         }
     }

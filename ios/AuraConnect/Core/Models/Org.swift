@@ -32,6 +32,9 @@ struct Member: Codable, Identifiable {
     var active: Bool?
     var fcmTokens: [String]?
     var createdAt: Date?
+    /// v3 extra permissions (`reports`, `audit`, `staffing`, `scheduling`, `volunteers`,
+    /// `bereavement`). Raw strings so unknown values never break decoding. Admins hold all implicitly.
+    var capabilities: [String]?
 
     /// The member's uid (document id, falling back to the `uid` field).
     var memberUid: String { id ?? uid ?? "" }
@@ -43,6 +46,11 @@ struct Member: Codable, Identifiable {
     }
 
     var isActive: Bool { active ?? true }
+
+    /// True when the member holds `capability` explicitly or is an admin.
+    func has(capability: String) -> Bool {
+        role == .admin || (capabilities ?? []).contains(capability)
+    }
 
     /// e.g. "RN · Case Manager"
     var subtitle: String {

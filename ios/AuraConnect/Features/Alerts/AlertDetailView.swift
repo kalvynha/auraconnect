@@ -148,6 +148,11 @@ private struct AlertDetailContent: View {
                             Label("Open conversation", systemImage: "bubble.left.and.bubble.right")
                         }
                     }
+                    if let visitId = source.visitId?.nilIfBlank {
+                        NavigationLink(value: Route.visit(visitId)) {
+                            Label("Open visit", systemImage: "calendar.badge.clock")
+                        }
+                    }
                     if let patientId = source.patientId {
                         NavigationLink(value: Route.patient(patientId)) {
                             Label("Open patient", systemImage: "person.text.rectangle")

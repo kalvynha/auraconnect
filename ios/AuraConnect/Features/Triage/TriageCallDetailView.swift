@@ -135,7 +135,7 @@ private struct TriageCallDetailContent: View {
             Section("Caller") {
                 LabeledContent("Name", value: call.displayCaller)
                 InfoRow(label: "Relationship", value: call.callerRelationship)
-                InfoRow(label: "Phone", value: call.callerPhone)
+                InfoRow(label: "Phone", value: call.callerPhone, url: ContactLinks.phone(call.callerPhone))
             }
 
             if !call.symptomList.isEmpty {

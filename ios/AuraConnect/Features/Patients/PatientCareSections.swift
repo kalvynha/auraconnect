@@ -265,9 +265,35 @@ struct PatientVisitsSections: View {
 
         let past = care.pastVisits
         if !past.isEmpty {
-            Section("History") {
+            Section {
                 ForEach(past.prefix(50)) { visit in
+                    let canDocument = visit.visitStatus == .missed && (canAct || visit.assignedUid == org.uid)
                     VisitRow(visit: visit)
+                        .swipeActions(edge: .leading) {
+                            if canDocument {
+                                Button {
+                                    care.sheet = .completeVisit(visit)
+                                } label: {
+                                    Label("Document", systemImage: "checkmark")
+                                }
+                                .tint(.green)
+                            }
+                        }
+                        .contextMenu {
+                            if canDocument {
+                                Button {
+                                    care.sheet = .completeVisit(visit)
+                                } label: {
+                                    Label("Document missed visit", systemImage: "checkmark.circle")
+                                }
+                            }
+                        }
+                }
+            } header: {
+                Text("History")
+            } footer: {
+                if past.contains(where: { $0.visitStatus == .missed }) && canAct {
+                    Text("Swipe a missed visit to document it late.")
                 }
             }
         }

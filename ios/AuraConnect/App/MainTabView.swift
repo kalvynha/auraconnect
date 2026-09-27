@@ -5,15 +5,24 @@ struct MainTabView: View {
     @Environment(Router.self) private var router
     @State private var org: OrgStore
     @State private var alerts: AlertsStore
+    @State private var patientNames: PatientNameCache
 
     init(context: OrgContext) {
         _org = State(initialValue: OrgStore(context: context))
         _alerts = State(initialValue: AlertsStore(context: context))
+        _patientNames = State(initialValue: PatientNameCache(orgId: context.orgId))
     }
 
     var body: some View {
         @Bindable var router = router
         TabView(selection: $router.selectedTab) {
+            NavigationStack(path: $router.todayPath) {
+                TodayView()
+                    .appRouteDestinations()
+            }
+            .tabItem { Label("Today", systemImage: "sun.max") }
+            .tag(AppTab.today)
+
             NavigationStack(path: $router.inboxPath) {
                 InboxView()
                     .appRouteDestinations()
@@ -36,13 +45,6 @@ struct MainTabView: View {
             .badge(alerts.openCount)
             .tag(AppTab.alerts)
 
-            NavigationStack(path: $router.schedulePath) {
-                ScheduleView()
-                    .appRouteDestinations()
-            }
-            .tabItem { Label("Schedule", systemImage: "calendar") }
-            .tag(AppTab.schedule)
-
             NavigationStack(path: $router.morePath) {
                 MoreView()
                     .appRouteDestinations()
@@ -52,6 +54,7 @@ struct MainTabView: View {
         }
         .environment(org)
         .environment(alerts)
+        .environment(patientNames)
         .task { await org.runMembers() }
         .task { await org.runOrg() }
         .task { await alerts.run() }
@@ -126,6 +129,10 @@ struct RouteDestinationView: View {
             BereavementPlanDetailView(planId: id)
         case .volunteers:
             VolunteerView()
+        case .visit(let id):
+            VisitDetailView(visitId: id)
+        case .onCallSchedule:
+            ScheduleView()
         }
     }
 }

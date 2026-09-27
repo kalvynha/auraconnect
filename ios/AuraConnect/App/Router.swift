@@ -2,7 +2,7 @@ import Foundation
 import Observation
 
 enum AppTab: Hashable {
-    case inbox, patients, alerts, schedule, more
+    case today, inbox, patients, alerts, more
 }
 
 /// Navigation destinations shared by every tab's `NavigationStack`.
@@ -29,6 +29,9 @@ enum Route: Hashable {
     case bereavement
     case bereavementPlan(String)
     case volunteers
+    // v3 field usability
+    case visit(String)
+    case onCallSchedule
 }
 
 /// Holds tab selection and per-tab navigation paths so push notifications
@@ -38,11 +41,11 @@ enum Route: Hashable {
 final class Router {
     static let shared = Router()
 
-    var selectedTab: AppTab = .inbox
+    var selectedTab: AppTab = .today
+    var todayPath: [Route] = []
     var inboxPath: [Route] = []
     var patientsPath: [Route] = []
     var alertsPath: [Route] = []
-    var schedulePath: [Route] = []
     var morePath: [Route] = []
 
     /// A notification tap waiting for the org session to be ready.
@@ -51,10 +54,10 @@ final class Router {
     /// Pushes onto the currently selected tab's stack.
     func push(_ route: Route) {
         switch selectedTab {
+        case .today: todayPath.append(route)
         case .inbox: inboxPath.append(route)
         case .patients: patientsPath.append(route)
         case .alerts: alertsPath.append(route)
-        case .schedule: schedulePath.append(route)
         case .more: morePath.append(route)
         }
     }
@@ -88,11 +91,11 @@ final class Router {
     }
 
     func reset() {
-        selectedTab = .inbox
+        selectedTab = .today
+        todayPath = []
         inboxPath = []
         patientsPath = []
         alertsPath = []
-        schedulePath = []
         morePath = []
     }
 }

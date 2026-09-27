@@ -12,6 +12,23 @@ struct PatientRepository {
         collection.order(by: "lastName").limit(to: 1000).decodedStream(Patient.self)
     }
 
+    /// Patients with one status, by last name. Composite index: patients (status ASC, lastName ASC).
+    func patients(status: PatientStatus, limit: Int = 1000) -> AsyncThrowingStream<[Patient], Error> {
+        collection
+            .whereField("status", isEqualTo: status.rawValue)
+            .order(by: "lastName")
+            .limit(to: limit)
+            .decodedStream(Patient.self)
+    }
+
+    /// Patients whose care team includes `uid`. Array-contains only (single-field index); callers sort.
+    func patients(careTeamMember uid: String, limit: Int = 500) -> AsyncThrowingStream<[Patient], Error> {
+        collection
+            .whereField("careTeamUids", arrayContains: uid)
+            .limit(to: limit)
+            .decodedStream(Patient.self)
+    }
+
     func patient(id: String) -> AsyncThrowingStream<Patient?, Error> {
         collection.document(id).decodedStream(Patient.self)
     }

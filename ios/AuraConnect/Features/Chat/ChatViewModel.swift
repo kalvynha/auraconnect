@@ -1,6 +1,17 @@
 import Foundation
 import Observation
 
+/// A message the server rejected. Firestore rolls back the local copy, so the content is kept
+/// here to show a "Not sent" bubble with Retry / Delete.
+struct FailedMessage: Identifiable {
+    let id = UUID()
+    let body: String
+    let priority: Priority
+    let attachments: [Attachment]
+    let failedAt: Date
+    let reason: String
+}
+
 @MainActor
 @Observable
 final class ChatViewModel {
@@ -12,6 +23,10 @@ final class ChatViewModel {
     private(set) var channelMissing = false
     /// Oldest first, at most the newest 200.
     private(set) var messages: [Message] = []
+    /// Ids of my messages that are only in the local cache so far (e.g. sent offline).
+    private(set) var pendingMessageIds: Set<String> = []
+    /// Messages the server rejected, oldest first.
+    private(set) var failedMessages: [FailedMessage] = []
     /// Read receipts by uid.
     private(set) var reads: [String: Date] = [:]
     private(set) var isLoading = true
@@ -79,8 +94,9 @@ final class ChatViewModel {
 
     func runMessages() async {
         do {
-            for try await newestFirst in messageRepository.recentMessages(channelId: channelId, limit: 200) {
-                messages = Array(newestFirst.reversed())
+            for try await snapshot in messageRepository.recentMessagesWithPending(channelId: channelId, limit: 200) {
+                messages = Array(snapshot.messages.reversed())
+                pendingMessageIds = snapshot.pendingIds
                 isLoading = false
                 markReadIfNeeded()
             }
@@ -130,17 +146,40 @@ final class ChatViewModel {
     func send(senderName: String) {
         let body = draft.trimmed
         guard canSend else { return }
+        write(body: body, priority: priority, attachments: pendingAttachments, senderName: senderName)
+        draft = ""
+        priority = .normal
+        pendingAttachments = []
+    }
+
+    func isPending(_ message: Message) -> Bool {
+        guard let id = message.id else { return false }
+        return pendingMessageIds.contains(id)
+    }
+
+    /// Sends a rejected message again (as a new document).
+    func retry(_ failed: FailedMessage, senderName: String) {
+        failedMessages.removeAll { $0.id == failed.id }
+        write(body: failed.body, priority: failed.priority, attachments: failed.attachments, senderName: senderName)
+    }
+
+    func discard(_ failed: FailedMessage) {
+        failedMessages.removeAll { $0.id == failed.id }
+    }
+
+    private func write(body: String, priority: Priority, attachments: [Attachment], senderName: String) {
         messageRepository.send(
             channelId: channelId,
             senderUid: uid,
             senderName: senderName,
             body: body,
             priority: priority,
-            attachments: pendingAttachments
+            attachments: attachments,
+            onError: { [weak self] error in
+                self?.failedMessages.append(FailedMessage(body: body, priority: priority, attachments: attachments,
+                                                          failedAt: Date(), reason: error.userMessage))
+            }
         )
-        draft = ""
-        priority = .normal
-        pendingAttachments = []
     }
 
     func attach(data: Data, fileName: String, contentType: String) async {

@@ -42,6 +42,9 @@ struct MoreView: View {
             }
 
             Section("Coordination") {
+                NavigationLink(value: Route.onCallSchedule) {
+                    Label("On-call schedule", systemImage: "calendar")
+                }
                 NavigationLink(value: Route.triage) {
                     Label("Triage calls", systemImage: "phone.arrow.down.left")
                 }

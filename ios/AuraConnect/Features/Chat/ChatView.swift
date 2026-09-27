@@ -19,6 +19,7 @@ private struct ChatContent: View {
     @State private var model: ChatViewModel
     @State private var photoItem: PhotosPickerItem? = nil
     @State private var showPhotoPicker = false
+    @State private var showCamera = false
     @State private var showFileImporter = false
     @State private var showMembers = false
     @State private var showSummary = false
@@ -134,6 +135,16 @@ private struct ChatContent: View {
             .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.pdf, .image]) { result in
                 handleImport(result)
             }
+            .fullScreenCover(isPresented: $showCamera) {
+                CameraPicker(
+                    onCapture: { image in
+                        showCamera = false
+                        Task { await attachCameraPhoto(image) }
+                    },
+                    onCancel: { showCamera = false }
+                )
+                .ignoresSafeArea()
+            }
             .quickLookPreview($model.previewURL)
             .onChange(of: model.previewURL) { oldValue, newValue in
                 if newValue == nil { ChatViewModel.removeTemporaryFile(oldValue) }
@@ -175,6 +186,7 @@ private struct ChatContent: View {
                             senderName: message.senderName?.nilIfBlank ?? org.name(for: message.senderUid),
                             showSender: previous?.senderUid != message.senderUid,
                             readByText: receipt?.messageId == message.id ? receipt?.text : nil,
+                            isPending: model.isPending(message),
                             openingPath: model.openingAttachmentPath,
                             onOpenAttachment: { attachment in
                                 Task { await model.open(attachment) }
@@ -183,6 +195,13 @@ private struct ChatContent: View {
                         )
                         .contextMenu { messageMenu(message) }
                         .id(message.id ?? "")
+                    }
+                    ForEach(model.failedMessages) { failed in
+                        FailedMessageBubble(
+                            failed: failed,
+                            onRetry: { model.retry(failed, senderName: org.myName) },
+                            onDiscard: { model.discard(failed) }
+                        )
                     }
                 }
                 .padding(.horizontal, 12)
@@ -213,7 +232,7 @@ private struct ChatContent: View {
     private func messageMenu(_ message: Message) -> some View {
         if !message.isRecalled && !message.text.isEmpty {
             Button {
-                UIPasteboard.general.string = message.text
+                SecurePasteboard.copy(message.text)
             } label: {
                 Label("Copy", systemImage: "doc.on.doc")
             }
@@ -275,6 +294,13 @@ private struct ChatContent: View {
             }
             HStack(alignment: .bottom, spacing: 10) {
                 Menu {
+                    if CameraPicker.isAvailable {
+                        Button {
+                            showCamera = true
+                        } label: {
+                            Label("Camera", systemImage: "camera")
+                        }
+                    }
                     Button {
                         showPhotoPicker = true
                     } label: {
@@ -347,6 +373,17 @@ private struct ChatContent: View {
         }
     }
 
+    /// Camera photos are encoded in memory and uploaded directly; they are never saved to the
+    /// photo library. Re-encoding as JPEG also drops EXIF metadata such as location.
+    private func attachCameraPhoto(_ image: UIImage) async {
+        guard let jpeg = image.jpegData(compressionQuality: 0.8) else {
+            model.errorMessage = "Couldn't process the photo."
+            return
+        }
+        let name = "camera-\(Int(Date().timeIntervalSince1970)).jpg"
+        await model.attach(data: jpeg, fileName: name, contentType: "image/jpeg")
+    }
+
     private func handleImport(_ result: Result<URL, Error>) {
         switch result {
         case .success(let url):
@@ -374,6 +411,8 @@ struct MessageBubble: View {
     let senderName: String
     let showSender: Bool
     let readByText: String?
+    /// Written locally but not yet on the server (e.g. offline).
+    var isPending: Bool = false
     let openingPath: String?
     let onOpenAttachment: (Attachment) -> Void
     /// When set, parents with replies show a "N replies" chip that calls this.
@@ -467,8 +506,14 @@ struct MessageBubble: View {
                     .accessibilityHint("Opens the thread")
                 }
                 HStack(spacing: 6) {
+                    if isPending {
+                        Image(systemName: "clock")
+                            .accessibilityLabel("Waiting to send")
+                    }
                     Text(message.createdAt.map { $0.formatted(date: .omitted, time: .shortened) } ?? "Sending…")
-                    if let readByText {
+                    if isPending {
+                        Text("· Waiting to send")
+                    } else if let readByText {
                         Text("· \(readByText)")
                     }
                 }
@@ -476,6 +521,56 @@ struct MessageBubble: View {
                 .foregroundStyle(.secondary)
             }
             if !isMine { Spacer(minLength: 48) }
+        }
+        .accessibilityElement(children: .contain)
+    }
+}
+
+/// A message the server rejected, with Retry / Delete. Shown after the timeline.
+struct FailedMessageBubble: View {
+    let failed: FailedMessage
+    let onRetry: () -> Void
+    let onDiscard: () -> Void
+
+    var body: some View {
+        HStack(alignment: .bottom) {
+            Spacer(minLength: 48)
+            VStack(alignment: .trailing, spacing: 4) {
+                VStack(alignment: .leading, spacing: 6) {
+                    if failed.priority != .normal {
+                        PriorityBadge(priority: failed.priority)
+                    }
+                    if !failed.body.isEmpty {
+                        Text(failed.body)
+                            .font(.body)
+                            .foregroundStyle(Color.primary)
+                    }
+                    if !failed.attachments.isEmpty {
+                        Label(failed.attachments.count == 1 ? "1 attachment" : "\(failed.attachments.count) attachments",
+                              systemImage: "paperclip")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(10)
+                .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 16).strokeBorder(Color.red.opacity(0.6), lineWidth: 1)
+                }
+                HStack(spacing: 10) {
+                    Label("Not sent", systemImage: "exclamationmark.circle.fill")
+                        .foregroundStyle(.red)
+                    Button("Retry", action: onRetry)
+                        .fontWeight(.semibold)
+                    Button("Delete", role: .destructive, action: onDiscard)
+                }
+                .font(.caption)
+                .buttonStyle(.borderless)
+                Text(failed.reason)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.trailing)
+            }
         }
         .accessibilityElement(children: .contain)
     }

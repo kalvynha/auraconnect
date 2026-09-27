@@ -12,9 +12,13 @@ struct AlertSource: Codable, Hashable {
     var dueDate: String?
     /// v2 `{type:'triage', callId, patientId}`.
     var callId: String?
+    /// v3 `{type:'visit_missed', visitId, patientId}`.
+    var visitId: String?
 
     var isMessage: Bool { type == "message" }
     var isDeadline: Bool { type == "deadline" }
+    /// Paperwork deadlines (upcoming or overdue) as opposed to clinical alerts.
+    var isDeadlineKind: Bool { type?.hasPrefix("deadline") ?? false }
 }
 
 struct AlertEscalationEvent: Codable, Hashable {
