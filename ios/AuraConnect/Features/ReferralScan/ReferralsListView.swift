@@ -167,13 +167,13 @@ struct ReferralRow: View {
                     Text("· Phone")
                 }
             }
+            .font(.caption)
+            .foregroundStyle(.secondary)
             if let reviewer = referral.activeClaimant(), reviewer != org.uid {
                 Label("\(org.name(for: reviewer)) is reviewing", systemImage: "person.fill.checkmark")
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
-            .font(.caption)
-            .foregroundStyle(.secondary)
         }
         .padding(.vertical, 2)
         .accessibilityElement(children: .combine)
