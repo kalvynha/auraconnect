@@ -100,7 +100,30 @@ export interface Member {
   /** FCM registration tokens for this user's devices. */
   fcmTokens: string[];
   createdAt: TimestampLike;
+  /** v3: extra permissions granted by an admin without making the member an admin. */
+  capabilities?: Capability[];
 }
+
+/**
+ * v3 capabilities. Admins implicitly hold all of them.
+ *  - reports:     dashboards, metrics, compliance reports, exports
+ *  - audit:       read the audit log
+ *  - staffing:    edit care teams, reassign visits/tasks, offboarding preview
+ *  - scheduling:  schedule/reassign/cancel any visit, generate visit plans, manage shifts
+ *  - volunteers:  manage volunteer assignments, enter/void logs for volunteers
+ *  - bereavement: manage all bereavement plans and mailings
+ */
+export type Capability = 'reports' | 'audit' | 'staffing' | 'scheduling' | 'volunteers' | 'bereavement';
+export const CAPABILITIES: readonly Capability[] = ['reports', 'audit', 'staffing', 'scheduling', 'volunteers', 'bereavement'];
+
+/**
+ * v3: disciplines allowed to perform licensed lifecycle acts (record death, discharge,
+ * level-of-care change, recertification, milestone reopen, clinical updates such as code
+ * status). Admins may always perform them.
+ */
+export const LICENSED_DISCIPLINES: readonly Discipline[] = ['RN', 'NP', 'MD'];
+/** v3: disciplines that may post messages and complete their own visits even with role `viewer`. */
+export const FIELD_DISCIPLINES: readonly Discipline[] = ['Aide', 'LPN'];
 
 /** `orgs/{orgId}/invites/{inviteId}` */
 export interface Invite {
