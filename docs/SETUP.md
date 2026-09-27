@@ -72,10 +72,16 @@ It's safe to re-run. You still sign the BAA, upload the APNs key, turn on MFA an
    - **Authentication → Sign-in method → Email/Password → Email link (passwordless sign-in)** is on.
    - The console's domain is listed under **Authentication → Settings → Authorized domains**. `localhost` and `<project>.web.app` are included by default.
    - Optionally, edit the email text under **Authentication → Templates**.
+4. **Expiry and revocation.** Invites expire 14 days after they're sent. **Resend** on the pending-invites list sends the invite again and restarts the 14 days. **Revoke** cancels an invite so its link can no longer be used to join.
+5. **Accounts that already existed.** If someone already had an account for the invitee's email (for example, they self-registered with a password), the invite link makes the invitee choose a new password. There's no Skip, so the old password stops working.
+6. **Disabling self sign-up (recommended once your organization exists).** The web sign-up screen tells people to ask their administrator for an invite. Only someone starting a new organization creates an account themselves; `createOrg` stays open for them. To enforce this server-side, open **Identity Platform → Settings → User actions** in the Google Cloud console.
+   - **Simplest:** clear **Enable create (sign-up)**. Clients can then no longer create accounts, including through a first email-link sign-in. An administrator has to create each invitee's account first: Firebase console → **Authentication → Add user**, or the Admin SDK. The invite link then signs them in. New organizations are set up by your platform operator.
+   - **Invite-only alternative:** keep sign-up enabled and deploy a `beforeUserCreated` blocking function. It should allow an account only when a pending, unexpired invite exists for that email (a collection-group query on `invites`), plus any bootstrap emails you allow-list. AuraConnect doesn't ship this function; add it if you need self-service onboarding with enforcement.
 
 ## 4. Security checklist before real PHI
 - [ ] BAA signed. Every vendor that touches PHI is covered.
 - [ ] MFA required for all users. Session and app-lock timeouts agreed with compliance.
+- [ ] Self sign-up disabled or invite-only in Identity Platform (section 3, step 6).
 - [ ] Firestore and Storage rules deployed. `tests/rules` pass in CI.
 - [ ] Clinical/compliance staff have checked the milestone rules in `functions/src/domain/milestones.ts`.
 - [ ] Data Access audit logs on. Log sinks exclude message bodies.
