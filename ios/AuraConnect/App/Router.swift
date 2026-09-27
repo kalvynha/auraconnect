@@ -14,6 +14,21 @@ enum Route: Hashable {
     case referrals
     case members
     case settings
+    // v2 communication & coordination
+    case messageThread(channelId: String, messageId: String)
+    case messageSearch
+    case handoff
+    case triage
+    case triageCall(String)
+    case idgMeetings
+    case idgMeeting(String)
+    case dashboard
+    // v2 care workflows
+    case myTasks
+    case myVisits
+    case bereavement
+    case bereavementPlan(String)
+    case volunteers
 }
 
 /// Holds tab selection and per-tab navigation paths so push notifications

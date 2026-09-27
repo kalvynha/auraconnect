@@ -14,12 +14,16 @@ struct ChatView: View {
 
 private struct ChatContent: View {
     @Environment(OrgStore.self) private var org
+    @Environment(Router.self) private var router
     @Environment(\.scenePhase) private var scenePhase
     @State private var model: ChatViewModel
     @State private var photoItem: PhotosPickerItem? = nil
     @State private var showPhotoPicker = false
     @State private var showFileImporter = false
     @State private var showMembers = false
+    @State private var showSummary = false
+    @State private var showRecallConfirm = false
+    @State private var recallTarget: Message?
 
     init(orgId: String, uid: String, channelId: String) {
         _model = State(initialValue: ChatViewModel(orgId: orgId, channelId: channelId, uid: uid))
@@ -31,7 +35,16 @@ private struct ChatContent: View {
     }
 
     private var canCompose: Bool {
-        org.role.canSendMessages && model.channel != nil && model.channel?.archived != true
+        model.canPost(role: org.role)
+    }
+
+    /// Why the composer is hidden (nil while the channel is loading).
+    private var readOnlyReason: String? {
+        guard let channel = model.channel else { return nil }
+        if !org.role.canSendMessages { return "Read-only access" }
+        if channel.archived == true { return "This conversation is archived" }
+        if channel.isBroadcast { return "Broadcast · replies are turned off" }
+        return nil
     }
 
     /// "Read by …" caption for my most recent message.
@@ -50,8 +63,8 @@ private struct ChatContent: View {
             .safeAreaInset(edge: .bottom) {
                 if canCompose {
                     composer
-                } else if model.channel != nil && !org.role.canSendMessages {
-                    Text("Read-only access")
+                } else if let reason = readOnlyReason {
+                    Label(reason, systemImage: model.channel?.isBroadcast == true ? "megaphone" : "lock")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity)
@@ -71,6 +84,14 @@ private struct ChatContent: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
+                        showSummary = true
+                    } label: {
+                        Label("Summarize", systemImage: "sparkles")
+                    }
+                    .disabled(model.channel == nil)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
                         showMembers = true
                     } label: {
                         Label("Members", systemImage: "person.2")
@@ -81,6 +102,20 @@ private struct ChatContent: View {
             .sheet(isPresented: $showMembers) {
                 ChannelMembersSheet(memberUids: model.channel?.members ?? [])
                     .environment(org)
+            }
+            .sheet(isPresented: $showSummary) {
+                ChannelSummarySheet(orgId: org.orgId, channelId: channelId)
+            }
+            .confirmationDialog("Recall this message?",
+                                isPresented: $showRecallConfirm,
+                                titleVisibility: .visible,
+                                presenting: recallTarget) { message in
+                Button("Recall message", role: .destructive) {
+                    Task { await model.recall(message) }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: { _ in
+                Text("The text and attachments are removed for everyone. Recipients see \"Message recalled\".")
             }
             .task { await model.runChannel() }
             .task { await model.runMessages() }
@@ -115,8 +150,11 @@ private struct ChatContent: View {
 
     // MARK: Messages
 
+    private var channelId: String { model.channelId }
+
     private var messageList: some View {
         let receipt = readReceipt
+        let timeline = model.timeline
         return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 10) {
@@ -124,13 +162,13 @@ private struct ChatContent: View {
                         ContentUnavailableView("Conversation unavailable",
                                                systemImage: "lock.slash",
                                                description: Text("It may have been removed, or you are no longer a member."))
-                    } else if !model.isLoading && model.messages.isEmpty {
+                    } else if !model.isLoading && timeline.isEmpty {
                         ContentUnavailableView("No messages yet",
                                                systemImage: "bubble.left",
                                                description: Text("Messages are encrypted in transit and at rest."))
                     }
-                    ForEach(Array(model.messages.enumerated()), id: \.element.id) { index, message in
-                        let previous: Message? = index > 0 ? model.messages[index - 1] : nil
+                    ForEach(Array(timeline.enumerated()), id: \.element.id) { index, message in
+                        let previous: Message? = index > 0 ? timeline[index - 1] : nil
                         MessageBubble(
                             message: message,
                             isMine: message.senderUid == org.uid,
@@ -140,8 +178,10 @@ private struct ChatContent: View {
                             openingPath: model.openingAttachmentPath,
                             onOpenAttachment: { attachment in
                                 Task { await model.open(attachment) }
-                            }
+                            },
+                            onOpenThread: { openThread(message) }
                         )
+                        .contextMenu { messageMenu(message) }
                         .id(message.id ?? "")
                     }
                 }
@@ -153,11 +193,44 @@ private struct ChatContent: View {
             .overlay {
                 if model.isLoading { ProgressView() }
             }
-            .onChange(of: model.messages.last?.id) { _, lastId in
+            .onChange(of: timeline.last?.id) { _, lastId in
                 guard let lastId else { return }
                 withAnimation(.easeOut(duration: 0.2)) {
                     proxy.scrollTo(lastId, anchor: .bottom)
                 }
+            }
+        }
+    }
+
+    // MARK: Message actions
+
+    private func openThread(_ message: Message) {
+        guard let messageId = message.id else { return }
+        router.push(.messageThread(channelId: channelId, messageId: messageId))
+    }
+
+    @ViewBuilder
+    private func messageMenu(_ message: Message) -> some View {
+        if !message.isRecalled && !message.text.isEmpty {
+            Button {
+                UIPasteboard.general.string = message.text
+            } label: {
+                Label("Copy", systemImage: "doc.on.doc")
+            }
+        }
+        if message.id != nil && !message.isRecalled && (canCompose || message.replies > 0) {
+            Button {
+                openThread(message)
+            } label: {
+                Label(canCompose ? "Reply in thread" : "View thread", systemImage: "arrowshape.turn.up.left")
+            }
+        }
+        if model.canRecall(message, isAdmin: org.role == .admin) {
+            Button(role: .destructive) {
+                recallTarget = message
+                showRecallConfirm = true
+            } label: {
+                Label("Recall", systemImage: "arrow.uturn.backward.circle")
             }
         }
     }
@@ -303,8 +376,17 @@ struct MessageBubble: View {
     let readByText: String?
     let openingPath: String?
     let onOpenAttachment: (Attachment) -> Void
+    /// When set, parents with replies show a "N replies" chip that calls this.
+    var onOpenThread: (() -> Void)? = nil
 
     private var priority: Priority { message.messagePriority }
+
+    /// Recalled messages show no attachments (the backend deletes them).
+    private var visibleFiles: [Attachment] { message.isRecalled ? [] : message.files }
+
+    private var replyLabel: String {
+        message.replies == 1 ? "1 reply" : "\(message.replies) replies"
+    }
 
     private var bubbleColor: Color {
         isMine ? Color.accentColor.opacity(0.16) : Color(uiColor: .secondarySystemBackground)
@@ -320,7 +402,12 @@ struct MessageBubble: View {
                         .foregroundStyle(.secondary)
                 }
                 VStack(alignment: .leading, spacing: 6) {
-                    if priority != .normal {
+                    if message.isRecalled {
+                        Label("Message recalled", systemImage: "arrow.uturn.backward.circle")
+                            .font(.body.italic())
+                            .foregroundStyle(.secondary)
+                    }
+                    if priority != .normal && !message.isRecalled {
                         PriorityBadge(priority: priority)
                     }
                     if let role = message.roleTarget?.nilIfBlank {
@@ -328,13 +415,13 @@ struct MessageBubble: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                    if !message.text.isEmpty {
+                    if !message.isRecalled && !message.text.isEmpty {
                         Text(message.text)
                             .font(.body)
                             .foregroundStyle(Color.primary)
                             .textSelection(.enabled)
                     }
-                    ForEach(message.files, id: \.storagePath) { attachment in
+                    ForEach(visibleFiles, id: \.storagePath) { attachment in
                         Button {
                             onOpenAttachment(attachment)
                         } label: {
@@ -363,9 +450,21 @@ struct MessageBubble: View {
                 .padding(10)
                 .background(bubbleColor, in: RoundedRectangle(cornerRadius: 16))
                 .overlay {
-                    if priority != .normal {
+                    if priority != .normal && !message.isRecalled {
                         RoundedRectangle(cornerRadius: 16).strokeBorder(priority.color, lineWidth: 1.5)
                     }
+                }
+                if let onOpenThread, message.replies > 0 {
+                    Button(action: onOpenThread) {
+                        Label(replyLabel, systemImage: "bubble.left.and.bubble.right")
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background(Color.accentColor.opacity(0.12), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.accentColor)
+                    .accessibilityHint("Opens the thread")
                 }
                 HStack(spacing: 6) {
                     Text(message.createdAt.map { $0.formatted(date: .omitted, time: .shortened) } ?? "Sending…")

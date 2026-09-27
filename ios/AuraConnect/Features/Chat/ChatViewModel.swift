@@ -25,6 +25,8 @@ final class ChatViewModel {
     /// Local (file-protected) copy of an attachment being previewed with QuickLook.
     var previewURL: URL?
     var errorMessage: String?
+    /// Id of the message currently being recalled.
+    private(set) var recallingMessageId: String?
 
     @ObservationIgnored private var isVisible = false
     @ObservationIgnored private var lastMarkedMessageId: String?
@@ -37,6 +39,22 @@ final class ChatViewModel {
 
     private var channelRepository: ChannelRepository { ChannelRepository(orgId: orgId) }
     private var messageRepository: MessageRepository { MessageRepository(orgId: orgId) }
+
+    /// The channel timeline: thread replies are hidden (their parents show a "N replies" chip).
+    var timeline: [Message] { messages.filter { !$0.isThreadReply } }
+
+    /// Viewers never post; archived channels accept nothing; in a broadcast channel only the creator posts.
+    func canPost(role: Role) -> Bool {
+        guard role.canSendMessages, let channel, channel.archived != true else { return false }
+        if channel.isBroadcast { return channel.createdBy == uid }
+        return true
+    }
+
+    /// The sender or an admin may recall a message that reached the server.
+    func canRecall(_ message: Message, isAdmin: Bool) -> Bool {
+        guard message.id != nil, !message.isRecalled else { return false }
+        return message.senderUid == uid || isAdmin
+    }
 
     var canSend: Bool {
         let body = draft.trimmed
@@ -103,7 +121,7 @@ final class ChatViewModel {
 
     /// Names of members who have read my most recent message.
     func readersOfMyLastMessage() -> (messageId: String, readers: [String])? {
-        guard let mine = messages.last(where: { $0.senderUid == uid }), let id = mine.id else { return nil }
+        guard let mine = timeline.last(where: { $0.senderUid == uid }), let id = mine.id else { return nil }
         return (id, ChannelLogic.readers(of: mine.createdAt, senderUid: uid, reads: reads))
     }
 
@@ -150,6 +168,19 @@ final class ChatViewModel {
     /// so the uploaded file itself stays until a server-side cleanup removes it.)
     func removePending(_ attachment: Attachment) {
         pendingAttachments.removeAll { $0.storagePath == attachment.storagePath }
+    }
+
+    // MARK: Recall
+
+    func recall(_ message: Message) async {
+        guard let messageId = message.id, recallingMessageId == nil else { return }
+        recallingMessageId = messageId
+        defer { recallingMessageId = nil }
+        do {
+            try await FunctionsClient().recallMessage(orgId: orgId, channelId: channelId, messageId: messageId)
+        } catch {
+            errorMessage = error.userMessage
+        }
     }
 
     // MARK: Viewing attachments

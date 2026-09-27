@@ -444,11 +444,24 @@ struct Patient: Codable, Identifiable {
     var consents: Consents?
     var milestones: Milestones?
     var remindedMilestones: [String]?
+    // v2 (optional on read; older patients lack them)
+    /// Completed milestones keyed by `{kind}:{dueDate}`.
+    var milestoneCompletions: [String: MilestoneCompletion]?
+    /// Planned visit frequency per discipline.
+    var visitFrequencies: [VisitFrequency]?
+    var lastIdgReviewDate: String?
+    var nextIdgDueDate: String?
+    var dischargeDate: String?
+    var dischargeReason: DischargeReason?
+    var death: DeathRecord?
+    var bereavementPlanId: String?
     var createdBy: String?
     var createdAt: Date?
     var updatedAt: Date?
 
     var patientStatus: PatientStatus { status ?? .referral }
+    var completions: [String: MilestoneCompletion] { milestoneCompletions ?? [:] }
+    var frequencies: [VisitFrequency] { visitFrequencies ?? [] }
 
     var input: PatientInput {
         var value = PatientInput()

@@ -7,6 +7,8 @@ final class NewMessageViewModel {
     enum Mode: String, CaseIterable, Identifiable {
         case people = "People"
         case role = "On-call role"
+        /// Admin only.
+        case broadcast = "Broadcast"
         var id: String { rawValue }
     }
 
@@ -22,18 +24,24 @@ final class NewMessageViewModel {
     var errorMessage: String?
 
     private let functions = FunctionsClient()
+    let broadcast: BroadcastDraft
 
     init(orgId: String) {
         self.orgId = orgId
+        self.broadcast = BroadcastDraft(orgId: orgId)
     }
 
+    var isBusy: Bool { isWorking || broadcast.isWorking }
+
     var canStart: Bool {
-        guard !isWorking else { return false }
+        guard !isBusy else { return false }
         switch mode {
         case .people:
             return !selectedUids.isEmpty
         case .role:
             return selectedRoleKey != nil && roleBody.nilIfBlank != nil && roleBody.count <= AppConfig.maxMessageLength
+        case .broadcast:
+            return broadcast.isValid
         }
     }
 
@@ -58,6 +66,9 @@ final class NewMessageViewModel {
     /// Creates (or reuses) the channel, or sends the role message. Returns the channel id.
     func start() async -> String? {
         guard canStart else { return nil }
+        if mode == .broadcast {
+            return await broadcast.send()
+        }
         isWorking = true
         errorMessage = nil
         defer { isWorking = false }
@@ -75,6 +86,8 @@ final class NewMessageViewModel {
             case .role:
                 guard let roleKey = selectedRoleKey, let body = roleBody.nilIfBlank else { return nil }
                 return try await functions.sendRoleMessage(orgId: orgId, roleKey: roleKey, body: body, priority: rolePriority)
+            case .broadcast:
+                return nil
             }
         } catch {
             errorMessage = error.userMessage
@@ -119,7 +132,7 @@ private struct NewMessageContent: View {
             List {
                 Section {
                     Picker("Send to", selection: $model.mode) {
-                        ForEach(NewMessageViewModel.Mode.allCases) { mode in
+                        ForEach(availableModes) { mode in
                             Text(mode.rawValue).tag(mode)
                         }
                     }
@@ -137,6 +150,8 @@ private struct NewMessageContent: View {
                     peopleSections
                 case .role:
                     roleSections
+                case .broadcast:
+                    BroadcastSections(draft: model.broadcast, roles: model.roles)
                 }
             }
             .navigationTitle("New message")
@@ -146,7 +161,7 @@ private struct NewMessageContent: View {
                     Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    if model.isWorking {
+                    if model.isBusy {
                         ProgressView()
                     } else {
                         Button(model.mode == .people ? "Start" : "Send") {
@@ -161,7 +176,15 @@ private struct NewMessageContent: View {
                 }
             }
             .task { await model.runRoles() }
+            .task {
+                if org.role == .admin { await model.broadcast.runTeams() }
+            }
         }
+    }
+
+    /// Broadcasts are admin only.
+    private var availableModes: [NewMessageViewModel.Mode] {
+        NewMessageViewModel.Mode.allCases.filter { $0 != .broadcast || org.role == .admin }
     }
 
     @ViewBuilder

@@ -10,6 +10,8 @@ struct AlertSource: Codable, Hashable {
     var patientId: String?
     var milestone: MilestoneKind?
     var dueDate: String?
+    /// v2 `{type:'triage', callId, patientId}`.
+    var callId: String?
 
     var isMessage: Bool { type == "message" }
     var isDeadline: Bool { type == "deadline" }

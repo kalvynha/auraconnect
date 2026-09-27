@@ -64,6 +64,11 @@ private struct InboxContent: View {
         .searchable(text: $searchText, prompt: "Search conversations")
         .navigationTitle("Inbox")
         .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                NavigationLink(value: Route.messageSearch) {
+                    Label("Search messages", systemImage: "text.magnifyingglass")
+                }
+            }
             if org.role.canSendMessages {
                 ToolbarItem(placement: .primaryAction) {
                     Button {
@@ -104,6 +109,7 @@ struct ChannelRow: View {
         case .group: return "person.3.fill"
         case .patient: return "cross.case.fill"
         case .team: return "person.2.badge.gearshape.fill"
+        case .broadcast: return "megaphone.fill"
         }
     }
 
@@ -120,6 +126,12 @@ struct ChannelRow: View {
                     Text(title)
                         .font(.body.weight(isUnread ? .bold : .regular))
                         .lineLimit(1)
+                    if channel.isBroadcast {
+                        Image(systemName: "megaphone")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .accessibilityLabel("Broadcast")
+                    }
                     Spacer(minLength: 8)
                     Text(RelativeTime.short(channel.lastMessage?.at ?? channel.lastMessageAt))
                         .font(.caption)

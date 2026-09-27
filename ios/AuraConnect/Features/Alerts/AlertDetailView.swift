@@ -138,6 +138,11 @@ private struct AlertDetailContent: View {
 
             if let source = alert.source {
                 Section("Source") {
+                    if source.type == "triage", let callId = source.callId {
+                        NavigationLink(value: Route.triageCall(callId)) {
+                            Label("Open triage call", systemImage: "phone.arrow.down.left")
+                        }
+                    }
                     if source.isMessage, let channelId = source.channelId {
                         NavigationLink(value: Route.channel(channelId)) {
                             Label("Open conversation", systemImage: "bubble.left.and.bubble.right")

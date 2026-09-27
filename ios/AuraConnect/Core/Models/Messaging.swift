@@ -39,6 +39,8 @@ struct Channel: Codable, Identifiable {
 
     var members: [String] { memberUids ?? [] }
     var channelType: ChannelType { type ?? .group }
+    /// Only the creator may post in a broadcast channel.
+    var isBroadcast: Bool { channelType == .broadcast }
 }
 
 struct Attachment: Codable, Hashable {
@@ -86,10 +88,22 @@ struct Message: Codable, Identifiable {
     var roleTarget: String?
     var createdAt: Date?
     var alertId: String?
+    // v2 (optional on read; older messages lack them)
+    /// Thread replies point at their parent message id. Channel timelines hide replies.
+    var threadParentId: String?
+    /// Backend-maintained on parent messages.
+    var replyCount: Int?
+    /// Backend-maintained on parent messages.
+    var lastReplyAt: Date?
+    /// Set by `recallMessage`; body and attachments are then empty.
+    var recalledAt: Date?
 
     var text: String { body ?? "" }
     var messagePriority: Priority { priority ?? .normal }
     var files: [Attachment] { attachments ?? [] }
+    var isRecalled: Bool { recalledAt != nil }
+    var isThreadReply: Bool { threadParentId?.nilIfBlank != nil }
+    var replies: Int { replyCount ?? 0 }
 }
 
 /// `orgs/{orgId}/channels/{channelId}/reads/{uid}` (document id == uid).

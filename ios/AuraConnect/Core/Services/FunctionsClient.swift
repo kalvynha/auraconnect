@@ -19,7 +19,8 @@ struct AdmitResult: Hashable {
 /// Typed wrappers around the HTTPS callables in `us-central1` (docs/DATA_MODEL.md).
 /// Requests are encoded manually as `[String: Any]` so optional fields are sent as `null`.
 struct FunctionsClient {
-    private func call(_ name: String, _ payload: [String: Any]) async throws -> [String: Any] {
+    /// Internal (not private) so feature extensions such as `FunctionsClient+Comms` can use it.
+    func call(_ name: String, _ payload: [String: Any]) async throws -> [String: Any] {
         let callable = FirebaseService.functions.httpsCallable(name)
         let result = try await callable.call(payload)
         return (result.data as? [String: Any]) ?? [:]

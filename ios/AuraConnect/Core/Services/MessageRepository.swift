@@ -18,8 +18,22 @@ struct MessageRepository {
             .decodedStream(Message.self, serverTimestamps: .estimate)
     }
 
+    /// A single message (e.g. a thread's parent), with pending timestamps estimated.
+    func message(channelId: String, messageId: String) -> AsyncThrowingStream<Message?, Error> {
+        messages(channelId).document(messageId).decodedStream(Message.self, serverTimestamps: .estimate)
+    }
+
+    /// Replies in a thread. Equality filter only (no composite index); callers sort by `createdAt`.
+    func threadReplies(channelId: String, parentId: String, limit: Int = 500) -> AsyncThrowingStream<[Message], Error> {
+        messages(channelId)
+            .whereField("threadParentId", isEqualTo: parentId)
+            .limit(to: limit)
+            .decodedStream(Message.self, serverTimestamps: .estimate)
+    }
+
     /// Writes a message directly (works offline; appears instantly via latency compensation).
-    /// Shape must match firestore.rules exactly: 8 keys, explicit nulls, server timestamp.
+    /// Shape must match firestore.rules exactly: 8 keys, explicit nulls, server timestamp,
+    /// plus `threadParentId` for thread replies only.
     @discardableResult
     func send(
         channelId: String,
@@ -27,10 +41,11 @@ struct MessageRepository {
         senderName: String,
         body: String,
         priority: Priority,
-        attachments: [Attachment]
+        attachments: [Attachment],
+        threadParentId: String? = nil
     ) -> String {
         let ref = messages(channelId).document()
-        let data: [String: Any] = [
+        var data: [String: Any] = [
             "senderUid": senderUid,
             "senderName": senderName,
             "body": body,
@@ -40,6 +55,9 @@ struct MessageRepository {
             "createdAt": FieldValue.serverTimestamp(),
             "alertId": NSNull(),
         ]
+        if let threadParentId = threadParentId?.nilIfBlank {
+            data["threadParentId"] = threadParentId
+        }
         ref.setData(data) { error in
             if let error { print("[Chat] send failed: \(error.localizedDescription)") }
         }

@@ -86,7 +86,8 @@ enum Priority: String, Codable, CaseIterable, Identifiable, Hashable {
 }
 
 enum ChannelType: String, Codable, CaseIterable, Hashable {
-    case direct, group, patient, team
+    /// `broadcast`: only the creator posts; recipients read but cannot reply.
+    case direct, group, patient, team, broadcast
 
     init(from decoder: Decoder) throws {
         self = decodeTolerantEnum(decoder, fallback: .group)

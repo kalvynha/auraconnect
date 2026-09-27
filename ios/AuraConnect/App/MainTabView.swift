@@ -100,6 +100,32 @@ struct RouteDestinationView: View {
             MembersView()
         case .settings:
             SettingsView()
+        case .messageThread(let channelId, let messageId):
+            ThreadView(channelId: channelId, messageId: messageId)
+        case .messageSearch:
+            MessageSearchView()
+        case .handoff:
+            HandoffView()
+        case .triage:
+            TriageListView()
+        case .triageCall(let id):
+            TriageCallDetailView(callId: id)
+        case .idgMeetings:
+            IdgMeetingsView()
+        case .idgMeeting(let id):
+            IdgMeetingDetailView(meetingId: id)
+        case .dashboard:
+            DashboardView()
+        case .myTasks:
+            MyTasksView()
+        case .myVisits:
+            MyVisitsView()
+        case .bereavement:
+            BereavementListView()
+        case .bereavementPlan(let id):
+            BereavementPlanDetailView(planId: id)
+        case .volunteers:
+            VolunteerView()
         }
     }
 }
