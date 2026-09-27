@@ -16,8 +16,12 @@ rules_version = '2';
 //  - get() budget: at most 2 distinct documents are read per request
 //    (the caller's member doc plus at most one of: the channel for channel
 //    subcollections, the escalation policy on org update, or the parent
-//    patient on document create). Repeated get() of the same path is cached
-//    and billed once.
+//    patient on document create, or the parent patient when a volunteer
+//    reads patient events/documents). Repeated get() of the same path is
+//    cached and billed once.
+//  - v3 (docs/PERSONA_REVIEW.md L3, C2, S3): capabilities and discipline are
+//    read from the caller's member doc (already fetched above, so no extra
+//    get()). Admins implicitly hold every capability.
 
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -59,8 +63,49 @@ service cloud.firestore {
       return hasRole(orgId, ['admin']);
     }
 
+    // v3 capability strings (functions/src/shared/types.ts CAPABILITIES).
+    function capabilityList() {
+      return ['reports', 'audit', 'staffing', 'scheduling', 'volunteers', 'bereavement'];
+    }
+
+    // Admin, or an active member granted `cap` in member.capabilities.
+    function hasCap(orgId, cap) {
+      return isAdmin(orgId)
+        || (isActiveMember(orgId) && cap in memberDoc(orgId).data.get('capabilities', []));
+    }
+
+    // Admin, or an active RN/NP/MD (LICENSED_DISCIPLINES).
+    function isLicensed(orgId) {
+      return isAdmin(orgId)
+        || (isActiveMember(orgId) && memberDoc(orgId).data.discipline in ['RN', 'NP', 'MD']);
+    }
+
+    // Active Aide/LPN (FIELD_DISCIPLINES): may message even with role `viewer`.
+    function isFieldStaff(orgId) {
+      return isActiveMember(orgId) && memberDoc(orgId).data.discipline in ['Aide', 'LPN'];
+    }
+
+    // v3 minimum-necessary: a non-admin member whose discipline is Volunteer.
+    function isVolunteer(orgId) {
+      return isActiveMember(orgId)
+        && memberDoc(orgId).data.discipline == 'Volunteer'
+        && !isAdmin(orgId);
+    }
+
+    // Active member who is not a (non-admin) volunteer.
+    function isStaffMember(orgId) {
+      return isActiveMember(orgId) && !isVolunteer(orgId);
+    }
+
+    // v3: aides/LPNs with role `viewer` can message their RN.
+    // `me` is the caller's member doc data (active already checked).
+    function canPostAs(me) {
+      return (role() in ['admin', 'clinician', 'intake'] && me.role in ['admin', 'clinician', 'intake'])
+        || (role() == 'viewer' && me.role == 'viewer' && me.discipline in ['Aide', 'LPN']);
+    }
+
     function canPost(orgId) {
-      return hasRole(orgId, ['admin', 'clinician', 'intake']);
+      return isActiveMember(orgId) && canPostAs(memberDoc(orgId).data);
     }
 
     // --- Shape helpers ----------------------------------------------------
@@ -115,6 +160,28 @@ service cloud.firestore {
       return v is string && (v == 'application/pdf' || v.matches('image/.*'));
     }
 
+    function isMilestoneKind(v) {
+      return v in ['noe', 'recert', 'f2f', 'hope_admission', 'hope_huv1', 'hope_huv2', 'aide_supervision'];
+    }
+
+    // Optional per-kind override of deadlineLeadDays: {kind: int 0..90}.
+    function isLeadDaysByKind(m) {
+      return m is map
+        && m.keys().hasOnly(['noe', 'recert', 'f2f', 'hope_admission', 'hope_huv1', 'hope_huv2', 'aide_supervision'])
+        && isIntInRange(m.get('noe', 0), 0, 90)
+        && isIntInRange(m.get('recert', 0), 0, 90)
+        && isIntInRange(m.get('f2f', 0), 0, 90)
+        && isIntInRange(m.get('hope_admission', 0), 0, 90)
+        && isIntInRange(m.get('hope_huv1', 0), 0, 90)
+        && isIntInRange(m.get('hope_huv2', 0), 0, 90)
+        && isIntInRange(m.get('aide_supervision', 0), 0, 90);
+    }
+
+    // At most 6 entries, each a known capability string.
+    function isCapabilityList(v) {
+      return v is list && v.size() <= 6 && v.hasOnly(capabilityList());
+    }
+
     function isVolunteerActivity(v) {
       return v in ['companionship', 'respite', 'vigil', 'errands', 'bereavement', 'admin', 'other'];
     }
@@ -145,7 +212,8 @@ service cloud.firestore {
       allow update: if isAdmin(orgId)
         && onlyChanged(['name', 'timezone', 'deadlineLeadDays', 'defaultEscalationPolicyId',
                         'triageRoleKey', 'idgCadenceDays', 'missedVisitGraceMinutes',
-                        'messageLifespanDays'])
+                        'messageLifespanDays', 'deadlineLeadDaysByKind', 'missedVisitAlertMode',
+                        'defaultBereavementCoordinatorUid'])
         && isNonEmptyString(incoming().name, 200)
         && isNonEmptyString(incoming().timezone, 64)
         && incoming().deadlineLeadDays is int
@@ -159,7 +227,13 @@ service cloud.firestore {
         && isIntInRange(incoming().get('idgCadenceDays', 15), 1, 30)
         && isIntInRange(incoming().get('missedVisitGraceMinutes', 120), 15, 1440)
         && (incoming().get('messageLifespanDays', null) == null
-            || isIntInRange(incoming().get('messageLifespanDays', null), 7, 3650));
+            || isIntInRange(incoming().get('messageLifespanDays', null), 7, 3650))
+        // v3 settings (optional).
+        && isLeadDaysByKind(incoming().get('deadlineLeadDaysByKind', {}))
+        && incoming().get('missedVisitAlertMode', 'assignee_admins')
+             in ['assignee', 'assignee_admins', 'digest', 'off']
+        && (incoming().get('defaultBereavementCoordinatorUid', null) == null
+            || isNonEmptyString(incoming().get('defaultBereavementCoordinatorUid', null), 128));
 
       // -------------------------------------------------------------------
       // members/{uid} — created by `createOrg` / `acceptInvite`.
@@ -180,9 +254,12 @@ service cloud.firestore {
             && isStringOrNull(incoming().phone, 50)
             && incoming().teamIds is list
             && incoming().fcmTokens is list
-            && incoming().fcmTokens.size() <= 20)
+            && incoming().fcmTokens.size() <= 20
+            // v3: optional capability grants (known strings only).
+            && isCapabilityList(incoming().get('capabilities', [])))
           ||
-          // Self: profile + device tokens only (never role/active/teamIds).
+          // Self: profile + device tokens only (never role, discipline,
+          // capabilities, active or teamIds).
           (request.auth.uid == uid
             && isActiveMember(orgId)
             && onlyChanged(['fcmTokens', 'displayName', 'phone', 'title'])
@@ -216,10 +293,11 @@ service cloud.firestore {
           && incoming().createdAt is timestamp;
       }
 
+      // v3: `scheduling` capability (or admin) manages on-call roles and shifts.
       match /onCallRoles/{roleKey} {
         allow read: if isActiveMember(orgId);
-        allow delete: if isAdmin(orgId);
-        allow create, update: if isAdmin(orgId)
+        allow delete: if hasCap(orgId, 'scheduling');
+        allow create, update: if hasCap(orgId, 'scheduling')
           && exactKeys(['label', 'discipline', 'teamId', 'fallbackUids'])
           && isNonEmptyString(incoming().label, 200)
           && (incoming().discipline == null || isDiscipline(incoming().discipline))
@@ -230,8 +308,8 @@ service cloud.firestore {
 
       match /shifts/{shiftId} {
         allow read: if isActiveMember(orgId);
-        allow delete: if isAdmin(orgId);
-        allow create, update: if isAdmin(orgId)
+        allow delete: if hasCap(orgId, 'scheduling');
+        allow create, update: if hasCap(orgId, 'scheduling')
           && exactKeys(['roleKey', 'uid', 'start', 'end', 'notes'])
           && isNonEmptyString(incoming().roleKey, 128)
           && isNonEmptyString(incoming().uid, 128)
@@ -269,6 +347,71 @@ service cloud.firestore {
             && request.auth.uid in channelDoc().data.memberUids;
         }
 
+        // L1: one message attachment: only {storagePath, contentType, name,
+        // size} (a missing key errors on access, so the set is exact).
+        // storagePath must match `pathRe`, i.e.
+        // `orgs/{orgId}/channels/{channelId}/attachments/{fileName}` with a
+        // single-segment fileName. orgId/channelId are server-generated ids
+        // (no regex metacharacters). name: 1-200 chars; size: int 1..25 MB.
+        // Kept lean and `pathRe` is built once by the caller: 10 attachments
+        // must fit in the 1000-expression evaluation limit (tested).
+        function isAttachment(a, pathRe) {
+          return a.keys().hasOnly(['storagePath', 'contentType', 'name', 'size'])
+            && a.storagePath.matches(pathRe)
+            && a.contentType is string
+            && a.name.matches('(?s).{1,200}')
+            && a.size is int
+            && a.size > 0
+            && a.size <= 26214400;
+        }
+
+        function areAttachments(l, pathRe) {
+          let n = l.size();
+          return n <= 10
+            && (n <= 0 || isAttachment(l[0], pathRe))
+            && (n <= 1 || isAttachment(l[1], pathRe))
+            && (n <= 2 || isAttachment(l[2], pathRe))
+            && (n <= 3 || isAttachment(l[3], pathRe))
+            && (n <= 4 || isAttachment(l[4], pathRe))
+            && (n <= 5 || isAttachment(l[5], pathRe))
+            && (n <= 6 || isAttachment(l[6], pathRe))
+            && (n <= 7 || isAttachment(l[7], pathRe))
+            && (n <= 8 || isAttachment(l[8], pathRe))
+            && (n <= 9 || isAttachment(l[9], pathRe));
+        }
+
+        // Message create, given the caller's member doc data `me`, the channel
+        // doc data `ch` and the incoming message `m`.
+        function isValidNewMessage(me, ch, m) {
+          return me.active == true
+            && request.auth.uid in ch.memberUids
+            && canPostAs(me)
+            && ch.archived != true
+            && (ch.type != 'broadcast' || ch.createdBy == request.auth.uid)
+            && m.keys().hasAll(['senderUid', 'senderName', 'body', 'priority',
+                                'attachments', 'roleTarget', 'createdAt', 'alertId'])
+            && m.keys().hasOnly(['senderUid', 'senderName', 'body', 'priority',
+                                 'attachments', 'roleTarget', 'createdAt', 'alertId',
+                                 'threadParentId'])
+            && (m.get('threadParentId', null) == null
+                || isNonEmptyString(m.get('threadParentId', null), 128))
+            && m.senderUid == request.auth.uid
+            && isNonEmptyString(m.senderName, 200)
+            // M1: senderName must be the caller's member displayName (member
+            // doc already fetched; no extra get()).
+            && m.senderName == me.displayName
+            && m.body is string
+            && m.body.size() <= 8000
+            && isPriority(m.priority)
+            && m.attachments is list
+            && areAttachments(m.attachments,
+                              'orgs/' + orgId + '/channels/' + channelId + '/attachments/[^/]+')
+            && (m.body.size() > 0 || m.attachments.size() > 0)
+            && m.roleTarget == null
+            && m.createdAt == request.time
+            && m.alertId == null;
+        }
+
         // Clients write messages directly (offline-friendly); functions
         // fill in alertId and the channel's lastMessage.
         // v2: optional `threadParentId` (string or null) on create; in a
@@ -277,29 +420,11 @@ service cloud.firestore {
         match /messages/{messageId} {
           allow read: if isChannelMember();
 
-          allow create: if isChannelMember()
-            && canPost(orgId)
-            && channelDoc().data.archived != true
-            && (channelDoc().data.type != 'broadcast'
-                || channelDoc().data.createdBy == request.auth.uid)
-            && incoming().keys().hasAll(['senderUid', 'senderName', 'body', 'priority',
-                                         'attachments', 'roleTarget', 'createdAt', 'alertId'])
-            && incoming().keys().hasOnly(['senderUid', 'senderName', 'body', 'priority',
-                                          'attachments', 'roleTarget', 'createdAt', 'alertId',
-                                          'threadParentId'])
-            && (incoming().get('threadParentId', null) == null
-                || isNonEmptyString(incoming().get('threadParentId', null), 128))
-            && incoming().senderUid == request.auth.uid
-            && isNonEmptyString(incoming().senderName, 200)
-            && incoming().body is string
-            && incoming().body.size() <= 8000
-            && isPriority(incoming().priority)
-            && incoming().attachments is list
-            && incoming().attachments.size() <= 10
-            && (incoming().body.size() > 0 || incoming().attachments.size() > 0)
-            && incoming().roleTarget == null
-            && incoming().createdAt == request.time
-            && incoming().alertId == null;
+          // Evaluated with the member doc, channel doc and message data
+          // passed in once (keeps 10 attachments under the 1000-expression
+          // limit; same two get()s as before).
+          allow create: if claimOrg(orgId)
+            && isValidNewMessage(memberDoc(orgId).data, channelDoc().data, incoming());
 
           allow update, delete: if false;
         }
@@ -327,13 +452,34 @@ service cloud.firestore {
       // -------------------------------------------------------------------
       // patients/{patientId} — `admitPatient` / `acceptReferral` only.
       // -------------------------------------------------------------------
+      //
+      // v3 minimum-necessary: a Volunteer (non-admin) sees only patients
+      // whose `volunteerUids` contains them. `volunteerUids` is maintained by
+      // the backend (Cloud Functions) from the patient's ACTIVE
+      // volunteerAssignments; clients never write it. A volunteer's list
+      // query must filter where('volunteerUids', 'array-contains', uid).
+      // -------------------------------------------------------------------
       match /patients/{patientId} {
-        allow read: if isActiveMember(orgId);
+        allow read: if isStaffMember(orgId)
+          || (isVolunteer(orgId)
+              && request.auth.uid in resource.data.get('volunteerUids', []));
         allow write: if false;
+
+        // Volunteer access to subcollections follows the parent patient.
+        // get() budget: member doc + this patient doc.
+        function volunteerAssignedToPatient() {
+          return isVolunteer(orgId)
+            && request.auth.uid in get(/databases/$(database)/documents/orgs/$(orgId)/patients/$(patientId))
+                                     .data.get('volunteerUids', []);
+        }
+
+        function canReadPatientChildren() {
+          return isStaffMember(orgId) || volunteerAssignedToPatient();
+        }
 
         // Timeline events — written only by functions.
         match /events/{eventId} {
-          allow read: if isActiveMember(orgId);
+          allow read: if canReadPatientChildren();
           allow write: if false;
         }
 
@@ -341,7 +487,7 @@ service cloud.firestore {
         // uploads the file to `storagePath`. Write-once from clients.
         // get() budget: member doc + parent patient existence.
         match /documents/{documentId} {
-          allow read: if isActiveMember(orgId);
+          allow read: if canReadPatientChildren();
 
           allow create: if isClinical(orgId)
             && exists(/databases/$(database)/documents/orgs/$(orgId)/patients/$(patientId))
@@ -366,14 +512,17 @@ service cloud.firestore {
       // -------------------------------------------------------------------
       // v2 care workflows — read by members, written only by functions
       // (visits, tasks, templates, bereavement, IDG, triage).
+      // v3: volunteers cannot read visits, tasks, IDG meetings or triage
+      // calls at all. `bereavement` capability: no client writes yet (all
+      // bereavement writes go through functions).
       // -------------------------------------------------------------------
       match /visits/{visitId} {
-        allow read: if isActiveMember(orgId);
+        allow read: if isStaffMember(orgId);
         allow write: if false;
       }
 
       match /tasks/{taskId} {
-        allow read: if isActiveMember(orgId);
+        allow read: if isStaffMember(orgId);
         allow write: if false;
       }
 
@@ -383,24 +532,25 @@ service cloud.firestore {
         allow write: if false;
       }
 
+      // M6: staff only (not volunteers).
       match /bereavementPlans/{planId} {
-        allow read: if isActiveMember(orgId);
+        allow read: if isStaffMember(orgId);
         allow write: if false;
       }
 
       match /idgMeetings/{meetingId} {
-        allow read: if isActiveMember(orgId);
+        allow read: if isStaffMember(orgId);
         allow write: if false;
       }
 
       match /triageCalls/{callId} {
-        allow read: if isActiveMember(orgId);
+        allow read: if isStaffMember(orgId);
         allow write: if false;
       }
 
-      // Dashboards: admin only.
+      // Dashboards: admin or `reports` capability.
       match /metrics/{date} {
-        allow read: if isAdmin(orgId);
+        allow read: if hasCap(orgId, 'reports');
         allow write: if false;
       }
 
@@ -421,29 +571,46 @@ service cloud.firestore {
           && isStringOrNull(incoming().notes, 2000);
       }
 
-      // Admin-managed. createdBy/createdAt are stamped on create and immutable.
+      // Managed by admin or the `volunteers` capability. createdBy/createdAt
+      // are stamped on create and immutable. A Volunteer (without the
+      // capability) reads only their own assignments; list queries must
+      // filter where('volunteerUid', '==', uid).
       match /volunteerAssignments/{assignmentId} {
-        allow read: if isActiveMember(orgId);
-        allow create: if isAdmin(orgId)
+        allow read: if isStaffMember(orgId)
+          || hasCap(orgId, 'volunteers')
+          || (isVolunteer(orgId) && resource.data.volunteerUid == request.auth.uid);
+        allow create: if hasCap(orgId, 'volunteers')
           && isVolunteerAssignment()
           && incoming().createdBy == request.auth.uid
           && incoming().createdAt == request.time;
-        allow update: if isAdmin(orgId)
+        allow update: if hasCap(orgId, 'volunteers')
           && isVolunteerAssignment()
           && incoming().createdBy == resource.data.createdBy
           && incoming().createdAt == resource.data.createdAt;
-        allow delete: if isAdmin(orgId);
+        allow delete: if hasCap(orgId, 'volunteers');
       }
 
-      // Any active member logs their own time; admins read all logs,
-      // others only their own (list queries must filter volunteerUid == uid).
+      // Any active member logs their own time; admins and the `volunteers`
+      // capability read all logs, others only their own (list queries must
+      // filter volunteerUid == uid).
+      // v3: coordinators (`volunteers` capability) may log for any volunteer;
+      // then `enteredBy` is required and must be the caller. On a self-log
+      // `enteredBy` is optional (absent, or the caller).
       match /volunteerLogs/{logId} {
-        allow read: if isAdmin(orgId)
+        allow read: if hasCap(orgId, 'volunteers')
           || (isActiveMember(orgId) && resource.data.volunteerUid == request.auth.uid);
 
         allow create: if isActiveMember(orgId)
-          && exactKeys(['volunteerUid', 'patientId', 'date', 'minutes', 'activity', 'note', 'createdAt'])
-          && incoming().volunteerUid == request.auth.uid
+          && incoming().keys().hasAll(['volunteerUid', 'patientId', 'date', 'minutes', 'activity',
+                                       'note', 'createdAt'])
+          && incoming().keys().hasOnly(['volunteerUid', 'patientId', 'date', 'minutes', 'activity',
+                                        'note', 'createdAt', 'enteredBy'])
+          && isNonEmptyString(incoming().volunteerUid, 128)
+          && ((incoming().volunteerUid == request.auth.uid
+               && incoming().get('enteredBy', request.auth.uid) == request.auth.uid)
+              || (incoming().volunteerUid != request.auth.uid
+                  && incoming().get('enteredBy', null) == request.auth.uid
+                  && hasCap(orgId, 'volunteers')))
           && (incoming().patientId == null || isNonEmptyString(incoming().patientId, 128))
           && isIsoDate(incoming().date)
           && isIntInRange(incoming().minutes, 1, 1440)
@@ -491,8 +658,9 @@ service cloud.firestore {
       // -------------------------------------------------------------------
       // auditLogs/{id} — written only by Cloud Functions.
       // -------------------------------------------------------------------
+      // v3: readable by admin or the `audit` capability.
       match /auditLogs/{logId} {
-        allow read: if isAdmin(orgId);
+        allow read: if hasCap(orgId, 'audit');
         allow write: if false;
       }
     }

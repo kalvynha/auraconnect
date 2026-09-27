@@ -20,6 +20,23 @@ export const USERS = {
   outsider: { uid: 'u-outsider', orgId: OTHER_ORG, role: 'admin', active: true },
 };
 
+/**
+ * v3 users (discipline / capability variants), seeded only by `seedV3`, so the
+ * v1/v2 fixtures are unchanged. All are in ORG and active.
+ */
+export const V3_USERS = {
+  aide: { uid: 'u-aide', orgId: ORG, role: 'viewer', active: true, discipline: 'Aide' },
+  lpn: { uid: 'u-lpn', orgId: ORG, role: 'viewer', active: true, discipline: 'LPN' },
+  volunteer: { uid: 'u-vol', orgId: ORG, role: 'viewer', active: true, discipline: 'Volunteer' },
+  volunteer2: { uid: 'u-vol2', orgId: ORG, role: 'viewer', active: true, discipline: 'Volunteer' },
+  volunteerAdmin: { uid: 'u-vol-admin', orgId: ORG, role: 'admin', active: true, discipline: 'Volunteer' },
+  scheduler: { uid: 'u-sched', orgId: ORG, role: 'clinician', active: true, discipline: 'RN', capabilities: ['scheduling'] },
+  coordinator: { uid: 'u-coord', orgId: ORG, role: 'viewer', active: true, discipline: 'SW', capabilities: ['volunteers'] },
+  reporter: { uid: 'u-reports', orgId: ORG, role: 'viewer', active: true, discipline: 'Admin', capabilities: ['reports'] },
+  auditor: { uid: 'u-audit', orgId: ORG, role: 'viewer', active: true, discipline: 'Admin', capabilities: ['audit'] },
+  inactiveScheduler: { uid: 'u-sched-off', orgId: ORG, role: 'clinician', active: false, discipline: 'RN', capabilities: ['scheduling'] },
+};
+
 export const CHANNEL = 'ch-care';
 /** rn, intake, viewer and inactive are channel members; admin and md are not. */
 export const CHANNEL_MEMBERS = [USERS.rn.uid, USERS.intake.uid, USERS.viewer.uid, USERS.inactive.uid];
@@ -44,14 +61,26 @@ export function memberDoc(user) {
     email: `${user.uid}@example.test`,
     displayName: user.uid,
     role: user.role,
-    discipline: 'RN',
+    discipline: user.discipline ?? 'RN',
     title: null,
     phone: null,
     teamIds: [],
     active: user.active,
     fcmTokens: [],
     createdAt: Timestamp.now(),
+    ...(user.capabilities ? { capabilities: user.capabilities } : {}),
   };
+}
+
+/** Seed the v3 users (member docs + userOrgs) on top of `seed`. */
+export async function seedV3(env) {
+  await env.withSecurityRulesDisabled(async (ctx) => {
+    const db = ctx.firestore();
+    for (const user of Object.values(V3_USERS)) {
+      await setDoc(doc(db, `orgs/${user.orgId}/members/${user.uid}`), memberDoc(user));
+      await setDoc(doc(db, `userOrgs/${user.uid}`), { orgId: user.orgId, role: user.role });
+    }
+  });
 }
 
 /** Seed a baseline world with rules disabled. */

@@ -64,7 +64,7 @@ describe('channel attachments', () => {
   it('viewer member cannot upload; oversize denied; delete denied', async () => {
     await assertFails(uploadBytes(ref(storage(USERS.viewer), attachmentPath('v.jpg')), SMALL, { contentType: 'image/jpeg' }));
     const big = new Uint8Array(25 * 1024 * 1024 + 1);
-    await assertFails(uploadBytes(ref(storage(USERS.rn), attachmentPath('big.bin')), big, { contentType: 'application/octet-stream' }));
+    await assertFails(uploadBytes(ref(storage(USERS.rn), attachmentPath('big.pdf')), big, { contentType: 'application/pdf' }));
     await assertFails(deleteObject(ref(storage(USERS.rn), attachmentPath('photo.png'))));
   });
 });

@@ -36,6 +36,36 @@ service firebase.storage {
         && memberDoc(orgId).data.role in roles;
     }
 
+    // v3: Aide/LPN members with role `viewer` may post messages (and so
+    // upload attachments). Mirrors canPost() in firestore.rules.
+    function canPost(orgId) {
+      return hasRole(orgId, ['admin', 'clinician', 'intake'])
+        || (hasRole(orgId, ['viewer']) && memberDoc(orgId).data.discipline in ['Aide', 'LPN']);
+    }
+
+    // v3 minimum-necessary: a non-admin member whose discipline is Volunteer.
+    function isVolunteer(orgId) {
+      return isActiveMember(orgId)
+        && memberDoc(orgId).data.discipline == 'Volunteer'
+        && !hasRole(orgId, ['admin']);
+    }
+
+    // Channel attachments: images (never SVG, which can carry script), PDF,
+    // plain text and common office documents. Never text/html.
+    function isAllowedAttachmentType(ct) {
+      return ct != null
+        && ct is string
+        && ((ct.matches('image/.*') && !ct.lower().matches('image/svg.*'))
+            || ct in ['application/pdf',
+                      'text/plain',
+                      'application/msword',
+                      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                      'application/vnd.ms-excel',
+                      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                      'application/vnd.ms-powerpoint',
+                      'application/vnd.openxmlformats-officedocument.presentationml.presentation']);
+    }
+
     // Belt and braces with `update: if false`: some emulator versions
     // evaluate an overwrite as `create`, so also require no existing object.
     function isNewObject() {
@@ -66,19 +96,26 @@ service firebase.storage {
       }
 
       allow read: if isChannelMember();
-      // Viewers cannot post messages, so they cannot upload attachments either.
+      // Only members who can post messages may upload attachments (plain
+      // viewers cannot; v3 Aide/LPN viewers can).
       allow create: if isNewObject()
         && isChannelMember()
-        && hasRole(orgId, ['admin', 'clinician', 'intake'])
-        && underMaxSize();
+        && canPost(orgId)
+        && underMaxSize()
+        && isAllowedAttachmentType(request.resource.contentType);
       allow update, delete: if false;
     }
 
     // Patient documents (consents, POLST, orders, plan of care…). The
     // Firestore record at orgs/{orgId}/patients/{patientId}/documents/{docId}
     // is created first; the file is then uploaded here.
+    // v3: volunteers read only files of patients whose `volunteerUids`
+    // (backend-maintained from active volunteer assignments) contains them.
+    // Cross-service reads: member doc + patient doc.
     match /orgs/{orgId}/patients/{patientId}/documents/{docId}/{fileName} {
-      allow read: if isActiveMember(orgId);
+      allow read: if isActiveMember(orgId)
+        && (!isVolunteer(orgId)
+            || request.auth.uid in firestore.get(/databases/(default)/documents/orgs/$(orgId)/patients/$(patientId)).data.get('volunteerUids', []));
       allow create: if isNewObject()
         && hasRole(orgId, ['admin', 'clinician', 'intake'])
         && underMaxSize()
